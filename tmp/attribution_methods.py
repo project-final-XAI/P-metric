@@ -152,10 +152,10 @@ def expected_gradcam_mask(model, x_norm, class_idx,
 def vit_gradcam_token(model: torch.nn.Module, x: torch.Tensor, class_idx: int) -> torch.Tensor:
     # ViT Grad-CAM implementation based on https://arxiv.org/abs/2012.09838
     target_mod = get_module_by_name(model, GRADCAM_TARGET_LAYER)
-    acts = {"val": None}
+    acts = {"imagenet": None}
 
     def hook_fn(mod, inp, out):
-        acts["val"] = out
+        acts["imagenet"] = out
         return out
 
     handle = target_mod.register_forward_hook(hook_fn)
@@ -163,7 +163,7 @@ def vit_gradcam_token(model: torch.nn.Module, x: torch.Tensor, class_idx: int) -
         x = x.detach().requires_grad_(True)
         logits = model(x)
         score = logits[:, class_idx].sum()
-        A = acts["val"]
+        A = acts["imagenet"]
         if A is None:
             raise RuntimeError("Hook did not capture activations.")
 
