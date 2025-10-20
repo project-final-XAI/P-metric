@@ -6,4 +6,4 @@
 *.fatbin
 .venv
 
-results
+results/heatmaps
