@@ -1,15 +1,17 @@
 # attribution_methods.py
 
+import numpy as np
 import torch
 import torch.nn.functional as F
-import numpy as np
 from captum.attr import Saliency, InputXGradient, GuidedBackprop, IntegratedGradients, GradientShap, Occlusion
 from skimage.segmentation import slic
+
 from config import (
     device, GRADCAM_TARGET_LAYER, OCCL_WINDOW, OCCL_STRIDE,
     EG_NUM_BASELINES, EG_ALPHA_RANGE, EG_NOISE_IMG_STD, EG_SMOOTH, EG_KERNEL_SIZE, EG_SIGMA
 )
 from utils import denormalize, MEAN, STD, _get_target_module, get_module_by_name
+
 
 # ============================================================
 # CNN CAM METHODS
@@ -29,7 +31,7 @@ def gradcam_mask_once(model: torch.nn.Module, x: torch.Tensor, class_idx: int) -
         h = target_mod.register_forward_hook(fwd_hook)
         try:
             logits = model(x)
-            score  = logits[:, class_idx].sum()
+            score = logits[:, class_idx].sum()
             A = acts_holder["acts"]
             if A is None:
                 raise RuntimeError("Forward hook did not capture activations.")
@@ -45,6 +47,7 @@ def gradcam_mask_once(model: torch.nn.Module, x: torch.Tensor, class_idx: int) -
             h.remove()
             torch.cuda.empty_cache()
 
+
 def guided_gradcam_mask(model, x, class_idx):
     """Guided Grad-CAM = Guided Backprop (pixel-level) ⨂ Grad-CAM (region-level) — CNN only."""
     x = x.clone().detach().requires_grad_()
@@ -52,7 +55,9 @@ def guided_gradcam_mask(model, x, class_idx):
     cam = gradcam_mask_once(model, x, class_idx)
     gb_attr = gbp.attribute(x, target=class_idx).detach()
     # Masking with Grad-CAM requires upsampling CAM to match GBP size
-    return (gb_attr * F.interpolate(cam, size=(224, 224), mode='bilinear', align_corners=False)).abs().mean(dim=1, keepdim=True)
+    return (gb_attr * F.interpolate(cam, size=(224, 224), mode='bilinear', align_corners=False)).abs().mean(dim=1,
+                                                                                                            keepdim=True)
+
 
 def expected_gradcam_mask(model, x_norm, class_idx,
                           num_baselines=8, alpha_steps=32,
@@ -61,7 +66,7 @@ def expected_gradcam_mask(model, x_norm, class_idx,
                           kernel_size=7, sigma=2.0):
     """Expected Grad-CAM across noisy baselines (CNN)."""
     model.eval()
-    x_img = denormalize(x_norm).clamp(0, 1)   # back to image space for baseline mixing
+    x_img = denormalize(x_norm).clamp(0, 1)  # back to image space for baseline mixing
     mean_img = MEAN.expand_as(x_img)
     cams_sum = None
 
@@ -75,11 +80,12 @@ def expected_gradcam_mask(model, x_norm, class_idx,
             activations_accum = None
 
             for alpha in torch.linspace(0, 1, alpha_steps, device=x_img.device):
-                x_interp_img  = baseline_img + alpha * (x_img - baseline_img)
+                x_interp_img = baseline_img + alpha * (x_img - baseline_img)
                 x_interp_norm = (x_interp_img - MEAN) / STD
                 x_interp_norm.requires_grad_()
 
                 activation_holder = {}
+
                 def forward_hook(module, input, output):
                     activation_holder["acts"] = output
                     output.requires_grad_(True)
@@ -95,23 +101,23 @@ def expected_gradcam_mask(model, x_norm, class_idx,
                     raise ValueError(f"Target layer '{GRADCAM_TARGET_LAYER}' not found")
 
                 try:
-                    out   = model(x_interp_norm)
+                    out = model(x_interp_norm)
                     score = out[0, class_idx]
-                    acts  = activation_holder["acts"]
+                    acts = activation_holder["acts"]
                     acts.requires_grad_(True)
                     model.zero_grad()
                     grads = torch.autograd.grad(score, acts, retain_graph=True, create_graph=False)[0]
 
                     if grads_accum is None:
-                        grads_accum       = grads.clone().detach()
+                        grads_accum = grads.clone().detach()
                         activations_accum = acts.detach().clone()
                     else:
-                        grads_accum       += grads.detach()
+                        grads_accum += grads.detach()
                         activations_accum += acts.detach()
                 finally:
                     hook.remove()
 
-            grads_avg       = grads_accum / alpha_steps
+            grads_avg = grads_accum / alpha_steps
             activations_avg = activations_accum / alpha_steps
             weights = grads_avg.mean(dim=(2, 3), keepdim=True)
             cam = (weights * activations_avg).sum(dim=1, keepdim=True)
@@ -130,7 +136,8 @@ def expected_gradcam_mask(model, x_norm, class_idx,
     cam_avg = cams_sum / float(num_baselines)
 
     if smooth:
-        k = torch.exp(-(torch.arange(kernel_size, device=x_img.device) - kernel_size // 2)[:, None] ** 2 / (2 * sigma ** 2))
+        k = torch.exp(
+            -(torch.arange(kernel_size, device=x_img.device) - kernel_size // 2)[:, None] ** 2 / (2 * sigma ** 2))
         k2d = k @ k.t()
         k2d = (k2d / k2d.sum()).view(1, 1, kernel_size, kernel_size)
         cam_avg = F.conv2d(cam_avg, k2d, padding=kernel_size // 2)
@@ -176,6 +183,7 @@ def vit_gradcam_token(model: torch.nn.Module, x: torch.Tensor, class_idx: int) -
     finally:
         handle.remove()
 
+
 # ============================================================
 # CAPTUM & COMMON GRAD-BASED METHODS (CNN + ViT compatible)
 # ============================================================
@@ -184,37 +192,45 @@ def saliency_mask(model, x, class_idx):
     x = x.clone().detach().requires_grad_()
     return Saliency(model).attribute(x, target=class_idx).abs().mean(dim=1, keepdim=True)
 
+
 def inputxgradient_mask(model, x, class_idx):
     """Input × Gradient (elementwise), |x · ∂y/∂x|, channel-averaged."""
     x = x.clone().detach().requires_grad_()
     return InputXGradient(model).attribute(x, target=class_idx).abs().mean(dim=1, keepdim=True)
+
 
 def guided_backprop_mask(model, x, class_idx):
     """Guided Backpropagation |∂y/∂x| with ReLU-only positive backprop rules."""
     x = x.clone().detach().requires_grad_()
     return GuidedBackprop(model).attribute(x, target=class_idx).abs().mean(dim=1, keepdim=True)
 
+
 def smoothgrad_mask(model, x, class_idx, n_samples=8, noise_level=0.1):
     """SmoothGrad: average saliency over noisy inputs to reduce visual noise."""
     base = x.clone().detach()
-    sal  = Saliency(model)
-    acc  = torch.zeros_like(base)
+    sal = Saliency(model)
+    acc = torch.zeros_like(base)
     for _ in range(n_samples):
         noisy = (base + noise_level * torch.randn_like(base)).detach().requires_grad_(True)
-        acc  += sal.attribute(noisy, target=class_idx).abs().detach()
+        acc += sal.attribute(noisy, target=class_idx).abs().detach()
     return (acc / n_samples).mean(dim=1, keepdim=True)
+
 
 def integrated_gradients_mask(model, x, class_idx, steps=50):
     """Integrated Gradients from zero baseline; absolute value + channel-average."""
     x = x.clone().detach().requires_grad_()
     baseline = torch.zeros_like(x)
-    return IntegratedGradients(model).attribute(x, baselines=baseline, target=class_idx, n_steps=steps).abs().mean(dim=1, keepdim=True)
+    return IntegratedGradients(model).attribute(x, baselines=baseline, target=class_idx, n_steps=steps).abs().mean(
+        dim=1, keepdim=True)
+
 
 def gradientshap_mask(model, x, class_idx, n_samples=64):
     """GradientShap: stochastic integration between zero and noisy baselines."""
     x = x.clone().detach().requires_grad_()
     baseline_dist = torch.cat([torch.zeros_like(x), torch.randn_like(x) * 0.1], dim=0)
-    return GradientShap(model).attribute(x, baselines=baseline_dist, target=class_idx, n_samples=n_samples).abs().mean(dim=1, keepdim=True)
+    return GradientShap(model).attribute(x, baselines=baseline_dist, target=class_idx, n_samples=n_samples).abs().mean(
+        dim=1, keepdim=True)
+
 
 def xrai_mask(model, x, class_idx):
     """XRAI (approx): segment-wise aggregation of IG to create region attributions."""
@@ -227,7 +243,7 @@ def xrai_mask(model, x, class_idx):
 
     # Segment the *denormalized* image for region stats
     img_denorm = denormalize(x.detach()).squeeze(0).cpu().numpy().transpose(1, 2, 0)
-    segments   = slic((img_denorm * 255).astype(np.uint8), n_segments=50, compactness=10)
+    segments = slic((img_denorm * 255).astype(np.uint8), n_segments=50, compactness=10)
 
     seg_heat = np.zeros_like(attr)
     for seg_id in np.unique(segments):
@@ -242,7 +258,7 @@ def xrai_mask(model, x, class_idx):
 # ============================================================
 def occlusion_mask(model, img_tensor, class_idx):
     """Captum Occlusion: slide a window and measure output sensitivity."""
-    input_    = img_tensor.clone().detach()
+    input_ = img_tensor.clone().detach()
     occlusion = Occlusion(model)
     attr = occlusion.attribute(
         input_,
@@ -253,10 +269,22 @@ def occlusion_mask(model, img_tensor, class_idx):
     )
     return attr.abs().mean(dim=1, keepdim=True)
 
+
 def naive_occ_mask(img_tensor):
     """Simple analytic radial map (not class-specific) used as a toy baseline."""
-    # ... implementation as in the original code ...
-    pass # Assume implementation from original code is here
+    if img_tensor.dim() == 3:
+        img_tensor = img_tensor.unsqueeze(0)
+    _, _, h, w = img_tensor.shape
+    yy, xx = torch.meshgrid(
+        torch.linspace(-1, 1, h, device=img_tensor.device),
+        torch.linspace(-1, 1, w, device=img_tensor.device),
+        indexing='ij'
+    )
+    sigma = 0.5
+    heat = torch.exp(-(xx ** 2 + yy ** 2) / (2 * sigma ** 2))
+    heat = (heat - heat.min()) / (heat.max() - heat.min() + 1e-12)
+    return heat.unsqueeze(0).unsqueeze(0)
+
 
 def random_baseline_mask(img_tensor):
     """Random importance map ∈ [0,1]."""
