@@ -1,0 +1,20 @@
+# Core deep learning
+torch>=2.2.0
+torchvision>=0.17.0
+captum>=0.7.0
+
+# Numerical and scientific computing
+numpy>=1.26.0
+
+# Image processing and visualization
+Pillow>=10.0.0
+scikit-image>=0.23.0
+matplotlib>=3.8.0
+
+# Progress bars and concurrency utilities
+tqdm>=4.66.0
+
+# Optional utilities
+concurrent-log-handler>=0.9.25
+
+# System & file handling (standard libraries like os are excluded)
