@@ -8,6 +8,7 @@ and XAI methods without altering the core logic.
 from pathlib import Path
 
 import torch
+from torchvision.models import vit_b_16
 
 # -----------------
 # Project Paths
@@ -58,15 +59,16 @@ DATASET_CONFIG = {
 # For custom models, you can define a path.
 GENERATING_MODELS = [
     "resnet50",
-    # "mobilenet_v2",
-    # "swin_t" # Example: Add more models here
+    "mobilenet_v2",
+    "vgg16",
+    "vit_b_16",
+    "swin_t",
 ]
 
 JUDGING_MODELS = [
-    # "resnet18",
-    "mobilenet_v2",
-    # "efficientnet_b0",
-    # "custom_model_path.pth" # Example for custom models
+    "resnet50",
+    "vit_b_16",
+    "swin_t",
 ]
 
 # -----------------
@@ -77,16 +79,26 @@ JUDGING_MODELS = [
 ATTRIBUTION_METHODS = [
     "saliency",
     "integrated_gradients",
+    "guided_backprop",
     "grad_cam",
-    # "guided_backprop",
-    # "xrai" # Example: Add more methods here
+    "saliency_mask",
+    "integrated_gradients_mask",
+    "guided_backprop_mask",
+    "gradcam_mask_once",
+    "vit_gradcam_token",
+    "inputxgradient_mask",
+    "guided_gradcam_mask",
+    "smoothgrad_mask",
+    "gradientshap_mask",
+    "xrai_mask",
+    "occlusion_mask",
+    "naive_occ_mask",
 ]
 
 # -----------------
 # Occlusion Configuration
 # -----------------
 # Occlusion levels (P) in percentage of pixels to remove.
-# [cite_start]The paper uses steps of 5, from 5 to 95. [cite: 158]
 OCCLUSION_LEVELS = list(range(5, 100, 5))
 
 # Fill strategies (S) for occluded regions.
@@ -94,6 +106,8 @@ OCCLUSION_LEVELS = list(range(5, 100, 5))
 FILL_STRATEGIES = [
     "gray",
     "blur",
-    # "random_noise",
-    # "black" # Example: Add more strategies here
+    "random_noise",
+    "black",
+    "mean",
+    "white",
 ]

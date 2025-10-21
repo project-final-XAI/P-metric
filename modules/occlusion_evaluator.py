@@ -15,6 +15,8 @@ from torchvision import transforms
 
 from config import DEVICE
 
+from functools import partial
+
 
 # --- Fill Strategy Implementations ---
 
@@ -52,13 +54,30 @@ def _fill_random_noise(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return occluded_image
 
 
+def _fill_solid_color(image: torch.Tensor, mask: torch.Tensor, color: float) -> torch.Tensor:
+    """Fills the masked area with a solid color."""
+    occluded_image = image.clone()
+    occluded_image[:, mask] = color
+    return occluded_image
+
+
+def _fill_mean_color(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Fills the masked area with a mean color."""
+    occluded_image = image.clone()
+    occluded_image[:, mask] = torch.mean(image[:, mask], dim=1, keepdim=True)
+    return occluded_image
+
+
 # --- Dispatcher for Fill Strategies ---
 # To add a new strategy, implement a function like the ones above
 # and add it to this dictionary.
 FILL_STRATEGY_REGISTRY: Dict[str, Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = {
-    "gray": _fill_gray,
+    "gray": partial(_fill_solid_color, color=0.5),
+    "black": partial(_fill_gray, color=0.0),
+    "white": partial(_fill_gray, color=1.0),
     "blur": _fill_blur,
     "random_noise": _fill_random_noise,
+    "mean": _fill_mean_color,
 }
 
 

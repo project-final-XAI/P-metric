@@ -1,9 +1,8 @@
-# modules/attribution_generator.py
 """
 Core module for generating attribution maps (heatmaps) for a given model
 and input. It uses the Captum library and is designed for modularity.
 """
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Union
 
 import numpy as np
 import torch
@@ -12,6 +11,12 @@ from captum.attr import (
     Saliency,
     IntegratedGradients,
     GuidedBackprop,
+    InputXGradient,
+    GuidedGradCam,
+    NoiseTunnel,
+    GradientShap,
+    XRAI,
+    Occlusion,
     LayerGradCam,
     LayerAttribution
 )
@@ -21,7 +26,7 @@ from transformers import ViTForImageClassification
 
 def _normalize_attribution(attribution: torch.Tensor) -> np.ndarray:
     """Normalizes the attribution map to the [0, 1] range and converts to numpy."""
-    # Move to CPU, convert to numpy, and take absolute values as per the paper's method for some techniques
+    # Move to CPU, convert to numpy, and take absolute values
     att_np = np.abs(attribution.squeeze().cpu().detach().numpy())
 
     # Handle single-channel or multi-channel heatmaps
@@ -35,8 +40,27 @@ def _normalize_attribution(attribution: torch.Tensor) -> np.ndarray:
     return att_np
 
 
+def _get_target_layer(model: Union[ResNet, ViTForImageClassification]) -> nn.Module:
+    """
+    Intelligently selects a target layer for layer-based attribution methods
+    like Grad-CAM. This is crucial for applying these methods to different
+    architectures correctly.
+    """
+    if isinstance(model, ResNet):
+        return model.layer4[-1]  # The last convolutional block in ResNet
+    elif isinstance(model, ViTForImageClassification):
+        # For Vision Transformers, the output of the last encoder layer is a good choice
+        return model.vit.encoder.layer[-1].output
+    # Add more elif blocks here for other architectures like Swin-T, EfficientNet etc.
+    # elif isinstance(model, SwinTransformer): ...
+    else:
+        raise NotImplementedError(f"Layer selection for {type(model).__name__} is not implemented.")
+
+
+# --- Original Attribution Methods ---
+
 def _get_saliency_attribution(model: nn.Module, image: torch.Tensor, target: int) -> np.ndarray:
-    """Computes Saliency attribution."""
+    """Computes Saliency attribution (gradient of output w.r.t. input)."""
     saliency = Saliency(model)
     attribution = saliency.attribute(image, target=target)
     return _normalize_attribution(attribution)
@@ -57,44 +81,110 @@ def _get_guided_backprop_attribution(model: nn.Module, image: torch.Tensor, targ
 
 
 def _get_grad_cam_attribution(model: nn.Module, image: torch.Tensor, target: int) -> np.ndarray:
-    """
-    Computes Layer Grad-CAM attribution.
-
-    This function intelligently selects the target layer based on the model
-    architecture (CNN vs. Transformer), as different architectures require
-    different handling.
-    """
-    # 1. Select the target layer based on model architecture
-    if isinstance(model, ResNet):
-        target_layer = model.layer4[-1]  # Last convolutional block
-    elif isinstance(model, ViTForImageClassification):
-        # As per pytorch-grad-cam library recommendations for ViT
-        target_layer = model.vit.encoder.layer[-1].output
-    # Add more elif blocks here for other architectures like Swin-T, EfficientNet etc.
-    # elif isinstance(model, SwinTransformer): ...
-    else:
-        raise NotImplementedError(f"Grad-CAM layer selection for {type(model).__name__} is not implemented.")
-
-    # 2. Compute Grad-CAM
+    """Computes Layer Grad-CAM attribution using an intelligently selected layer."""
+    target_layer = _get_target_layer(model)
     layer_gc = LayerGradCam(model, target_layer)
+    # relu_attributions=True helps in focusing on features with a positive influence
     attribution = layer_gc.attribute(image, target, relu_attributions=True)
-
-    # 3. Upsample the heatmap to match the input image size
-    # LayerAttribution.interpolate is a convenient method in Captum for this
     upsampled_attribution = LayerAttribution.interpolate(attribution, image.shape[2:], "bilinear")
+    return _normalize_attribution(upsampled_attribution)
 
+
+def _get_input_x_gradient_attribution(model: nn.Module, image: torch.Tensor, target: int) -> np.ndarray:
+    """Computes Input x Gradient attribution."""
+    ixg = InputXGradient(model)
+    attribution = ixg.attribute(image, target=target)
+    return _normalize_attribution(attribution)
+
+
+def _get_guided_grad_cam_attribution(model: nn.Module, image: torch.Tensor, target: int) -> np.ndarray:
+    """Computes Guided Grad-CAM, combining Guided Backprop with Grad-CAM for finer detail."""
+    target_layer = _get_target_layer(model)
+    ggc = GuidedGradCam(model, target_layer)
+    attribution = ggc.attribute(image, target)
+    return _normalize_attribution(attribution)
+
+
+def _get_smoothgrad_attribution(model: nn.Module, image: torch.Tensor, target: int) -> np.ndarray:
+    """
+    Computes SmoothGrad attribution by averaging gradients from noisy versions of the input.
+    This helps to reduce noise in the attribution map. It's a wrapper around another method.
+    """
+    # SmoothGrad is implemented in Captum using NoiseTunnel, which wraps another attribution algorithm.
+    # Here, we wrap Saliency, but it could also be Integrated Gradients, etc.
+    saliency = Saliency(model)
+    nt = NoiseTunnel(saliency)
+    attribution = nt.attribute(image, nt_type='smoothgrad', stdevs=0.1, n_samples=10, target=target)
+    return _normalize_attribution(attribution)
+
+
+def _get_gradient_shap_attribution(model: nn.Module, image: torch.Tensor, target: int) -> np.ndarray:
+    """
+    Computes GradientSHAP attribution. It approximates SHAP values using expected gradients.
+    Requires a baseline (e.g., a black image) to compare against.
+    """
+    # Create a baseline distribution of images. Here, we use a single black image.
+    baseline = torch.zeros_like(image)
+    gs = GradientShap(model)
+    # n_samples determines how many random points along the path from baseline to input are sampled.
+    attribution = gs.attribute(image, baselines=baseline, n_samples=50, stdevs=0.0, target=target)
+    return _normalize_attribution(attribution)
+
+
+def _get_xrai_attribution(model: nn.Module, image: torch.Tensor, target: int) -> np.ndarray:
+    """
+    Computes XRAI (eXplanation with Ranked Area Integrals) attribution.
+    It over-segments the image and computes region importance using Integrated Gradients.
+    """
+    # XRAI internally uses another attribution method, typically Integrated Gradients.
+    ig = IntegratedGradients(model)
+    xrai = XRAI(model, ig)
+    attribution = xrai.attribute(image, target=target)
+    return _normalize_attribution(attribution)
+
+
+def _get_occlusion_attribution(model: nn.Module, image: torch.Tensor, target: int) -> np.ndarray:
+    """
+    Computes Occlusion attribution, a perturbation-based method that measures the
+    drop in prediction confidence when parts of the image are masked.
+    """
+    occlusion = Occlusion(model)
+    # Define the size of the sliding window to occlude parts of the image.
+    # The first dimension (3) should match the number of image channels.
+    sliding_window_shapes = (3, 15, 15)
+    # Define the step size for the sliding window.
+    strides = (3, 8, 8)
+    attribution = occlusion.attribute(image,
+                                      strides=strides,
+                                      target=target,
+                                      sliding_window_shapes=sliding_window_shapes,
+                                      baselines=0)  # Use a black baseline for occlusion
+    # Occlusion attribution needs to be upsampled to match the original image size.
+    upsampled_attribution = LayerAttribution.interpolate(attribution, image.shape[2:], "bilinear")
     return _normalize_attribution(upsampled_attribution)
 
 
 # --- Dispatcher Dictionary ---
-# This is the key to modularity. To add a new method:
-# 1. Write a new `_get_..._attribution` function.
-# 2. Add its name and function handle to this dictionary.
+# This registry allows for easy extension. To add a new method:
+# 1. Write a new `_get_..._attribution` function above.
+# 2. Add its user-facing name and the function handle to this dictionary.
 ATTRIBUTION_REGISTRY: Dict[str, Callable[[nn.Module, torch.Tensor, int], np.ndarray]] = {
     "saliency": _get_saliency_attribution,
     "integrated_gradients": _get_integrated_gradients_attribution,
     "guided_backprop": _get_guided_backprop_attribution,
     "grad_cam": _get_grad_cam_attribution,
+    "saliency_mask": _get_saliency_attribution,
+    "integrated_gradients_mask": _get_integrated_gradients_attribution,
+    "guided_backprop_mask": _get_guided_backprop_attribution,
+    "gradcam_mask_once": _get_grad_cam_attribution,
+    "vit_gradcam_token": _get_grad_cam_attribution,
+    "inputxgradient_mask": _get_input_x_gradient_attribution,
+    "guided_gradcam_mask": _get_guided_grad_cam_attribution,
+    "smoothgrad_mask": _get_smoothgrad_attribution,
+    "gradientshap_mask": _get_gradient_shap_attribution,
+    "xrai_mask": _get_xrai_attribution,
+    "occlusion_mask": _get_occlusion_attribution,
+    "naive_occ_mask": _get_occlusion_attribution,
 }
 
 
@@ -128,11 +218,9 @@ def generate_attribution(
         raise ValueError(f"This function expects a single image, but got batch size {image.shape[0]}")
 
     try:
-        # print(f"Generating '{method_name}' attribution...")
         # Retrieve the function from the registry and call it
         attribution_func = ATTRIBUTION_REGISTRY[method_name]
         heatmap = attribution_func(model, image, target_class)
-        # print(f"Successfully generated '{method_name}' heatmap.")
         return heatmap
     except Exception as e:
         print(f"Error generating attribution for method '{method_name}' on model '{type(model).__name__}': {e}")
