@@ -91,8 +91,13 @@ def run_phase_2_evaluate(dataset_name: str):
     # 1. Prepare an output file
     results_csv_path = config.RESULTS_DIR / "evaluation_results.csv"
     csv_header = [
-        "generating_model", "attribution_method", "image_id", "judging_model",
-        "fill_strategy", "occlusion_level", "is_correct"
+        "generating_model",
+        "attribution_method",
+        "image_id",
+        "judging_model",
+        "fill_strategy",
+        "occlusion_level",
+        "is_correct"
     ]
 
     # Check if a file exists to decide whether to write a header
