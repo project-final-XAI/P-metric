@@ -31,7 +31,12 @@ ANALYSIS_DIR = BASE_DIR / "results" / "analysis"
 # -----------------
 # Hardware Configuration
 # -----------------
+MAX_WORKERS = 3
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {DEVICE.upper()}")
+
+
+# For monitor:              'nvidia-smi'
 
 # -----------------
 # Dataset Configuration

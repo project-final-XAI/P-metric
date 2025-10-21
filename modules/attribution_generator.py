@@ -15,7 +15,6 @@ from captum.attr import (
     GuidedGradCam,
     NoiseTunnel,
     GradientShap,
-    XRAI,
     Occlusion,
     LayerGradCam,
     LayerAttribution
