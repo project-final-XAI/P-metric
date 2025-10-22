@@ -27,4 +27,4 @@ for filename in os.listdir(src_dir):
     dst_path = os.path.join(class_folder, filename)
     shutil.move(src_path, dst_path)
 
-print("✅ Done! Images reorganized into class folders.")
+print("Images reorganized into class folders.")

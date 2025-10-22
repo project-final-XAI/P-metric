@@ -5,9 +5,10 @@ This script manages a pool of worker processes, with the number of workers
 limited to prevent GPU memory overload. Each worker loads models and data
 onto the GPU for efficient computation.
 """
+
 import argparse
 import csv
-import os
+import warnings
 from concurrent.futures import ProcessPoolExecutor
 from itertools import product
 from typing import Dict, Any
@@ -17,6 +18,8 @@ import torch
 from tqdm import tqdm
 
 import run_analysis
+
+warnings.filterwarnings("once")
 
 # --- Global Dictionaries for Worker Processes ---
 # These will be initialized in the main process and inherited by workers.

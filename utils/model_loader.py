@@ -26,7 +26,6 @@ def load_model(model_name: str) -> nn.Module:
     Raises:
         ValueError: If the model_name is not recognized or the file path is invalid.
     """
-    print(f"Loading model: {model_name}...")
 
     # # --- Future-proof logic for custom models ---
     # if model_name.endswith('.pth') or model_name.endswith('.pt'):
@@ -56,5 +55,4 @@ def load_model(model_name: str) -> nn.Module:
     model.to(DEVICE)
     model.eval()
 
-    print(f"Model '{model_name}' loaded successfully and moved to {DEVICE}.")
     return model

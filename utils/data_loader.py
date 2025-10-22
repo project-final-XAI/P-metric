@@ -26,8 +26,7 @@ def get_default_transforms() -> transforms.Compose:
 def prepare_imagenet_subset(
         full_imagenet_val_path: str,
         subset_path: str,
-        num_images_per_class: int = 1
-) -> None:
+        num_images_per_class: int = 1) -> None:
     """
     Creates a subset of the ImageNet validation set.
 
@@ -102,5 +101,4 @@ def get_dataloader(dataset_name: str, batch_size: int = 1, shuffle: bool = False
         num_workers=2
     )
 
-    print(f"Successfully loaded DataLoader for '{dataset_name}' with {len(image_folder)} images.")
     return dataloader

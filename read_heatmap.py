@@ -27,7 +27,7 @@ def show_heatmap_with_images():
 
         # If index is beyond the number of folders, skip
         if target_index >= len(imagenet_folders):
-            print(f"⚠️ No folder for index {target_index} (heatmap {heatmap_file})")
+            print(f"No folder for index {target_index} (heatmap {heatmap_file})")
             continue
 
         # Pick the corresponding folder
@@ -38,7 +38,7 @@ def show_heatmap_with_images():
         image_files = [f for f in os.listdir(folder_path)
                        if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
         if not image_files:
-            print(f"⚠️ No images in folder {target_folder}")
+            print(f"No images in folder {target_folder}")
             continue
 
         image_path = os.path.join(folder_path, image_files[0])
