@@ -5,6 +5,26 @@ This script manages a pool of worker processes, with the number of workers
 limited to prevent GPU memory overload. Each worker loads models and data
 onto the GPU for efficient computation.
 """
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+import importlib
+import sys
+
+try:
+    import safetensors  # Force preload before huggingface_hub
+except ImportError:
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "safetensors"])
+    import safetensors
+
+os.environ["PYTHONPATH"] = os.path.dirname(__file__)
+
+sys.modules["safetensors"] = importlib.import_module("safetensors")
+
+
+import multiprocessing
+
 
 import argparse
 import csv
@@ -36,7 +56,6 @@ except ImportError as e:
     print(f"Error importing modules: {e}")
     print("Please ensure you are running this script from the project's root directory.")
     exit()
-
 
 # --- Worker Functions for Parallel Processing ---
 def process_heatmap_generation_task(args):
@@ -185,12 +204,15 @@ def run_phase_2_evaluate(dataset_name: str):
 
 # (The __main__ block remains the same as your previous version)
 if __name__ == "__main__":
+    multiprocessing.set_start_method("spawn", force=True)
+    print("Using :", config.DEVICE)
+
     parser = argparse.ArgumentParser(
         description="Run the CROSS-XAI experiment with parallel processing.",
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument(
-        '--phase',
+            '--phase',
         type=int,
         choices=[1, 2, 3],
         help=(

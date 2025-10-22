@@ -4,6 +4,9 @@ and input. It uses the Captum library and is designed for modularity.
 """
 from typing import Callable, Dict, Optional, Union
 
+
+import saliency.core as saliency
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -17,7 +20,7 @@ from captum.attr import (
     GradientShap,
     Occlusion,
     LayerGradCam,
-    LayerAttribution
+    LayerAttribution,
 )
 from torchvision.models import ResNet
 from transformers import ViTForImageClassification
@@ -130,16 +133,25 @@ def _get_gradient_shap_attribution(model: nn.Module, image: torch.Tensor, target
     return _normalize_attribution(attribution)
 
 
-def _get_xrai_attribution(model: nn.Module, image: torch.Tensor, target: int) -> np.ndarray:
-    """
-    Computes XRAI (eXplanation with Ranked Area Integrals) attribution.
-    It over-segments the image and computes region importance using Integrated Gradients.
-    """
-    # XRAI internally uses another attribution method, typically Integrated Gradients.
-    ig = IntegratedGradients(model)
-    xrai = XRAI(model, ig)
-    attribution = xrai.attribute(image, target=target)
-    return _normalize_attribution(attribution)
+def _get_xrai_attribution(model, image, target):
+    def call_model_function(images, call_model_args=None):
+        with torch.no_grad():
+            preds = model(images)
+        return preds.cpu().numpy()
+
+    ig = saliency.IntegratedGradients()
+    xrai = saliency.XRAI()
+
+    baseline = np.zeros_like(image.cpu().numpy())
+    ig_attributions = ig.GetMask(image.cpu().numpy(), call_model_function,
+                                 call_model_args={'target': target},
+                                 x_steps=25, x_baseline=baseline)
+
+    xrai_attributions = xrai.GetMask(image.cpu().numpy(), call_model_function,
+                                     call_model_args={'target': target},
+                                     baselines=baseline)
+
+    return xrai_attributions
 
 
 def _get_occlusion_attribution(model: nn.Module, image: torch.Tensor, target: int) -> np.ndarray:

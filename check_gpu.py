@@ -6,12 +6,12 @@ is_available = torch.cuda.is_available()
 print(f"torch.cuda.is_available(): {is_available}")
 
 if is_available:
-    print(f"\n✅  SUCCESS: CUDA IS AVAILABLE!  ✅")
+    print(f"\nSUCCESS: CUDA IS AVAILABLE!")
     print(f"Device count: {torch.cuda.device_count()}")
     print(f"Current device: {torch.cuda.current_device()}")
     print(f"Device name: {torch.cuda.get_device_name(0)}")
 else:
-    print(f"\n❌  ERROR: CUDA IS NOT AVAILABLE  ❌")
+    print(f"\nERROR: CUDA IS NOT AVAILABLE")
     print("This confirms that PyTorch cannot see your GPU.")
     print("This is why 'config.DEVICE' is set to 'cpu'.")
     print("\n--- How to Fix ---")
