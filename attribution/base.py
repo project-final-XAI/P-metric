@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, Union
 import torch
 import numpy as np
+import logging
 
 
 class AttributionMethod(ABC):
@@ -34,7 +35,7 @@ class AttributionMethod(ABC):
             else:  # single
                 return self._single_image(model, images, targets)
         except Exception as e:
-            print(f"Error in {self.name}: {e}")
+            logging.error(f"Error in {self.name}: {e}")
             return None
             
     def _micro_batch(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:

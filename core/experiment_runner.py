@@ -122,7 +122,9 @@ class ExperimentRunner:
         # Process in batches
         for i in range(0, len(images_to_process), batch_size):
             end_idx = min(i + batch_size, len(images_to_process))
-            batch_images = torch.stack(images_to_process[i:end_idx]).to(self.config.DEVICE)
+            
+            # Concatenate images (they already have batch dim from dataloader)
+            batch_images = torch.cat(images_to_process[i:end_idx], dim=0).to(self.config.DEVICE)
             batch_labels = torch.tensor(labels[i:end_idx]).to(self.config.DEVICE)
             
             # Generate attributions

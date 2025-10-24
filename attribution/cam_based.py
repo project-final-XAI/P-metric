@@ -24,7 +24,7 @@ class GradCAMMethod(AttributionMethod):
         target_layer = get_target_layer(model)
         layer_gc = LayerGradCam(model, target_layer)
         
-        attribution = layer_gc.attribute(images, targets, relu_attributions=True)
+        attribution = layer_gc.attribute(images, target=targets, relu_attributions=True)
         upsampled = LayerAttribution.interpolate(attribution, images.shape[2:], "bilinear")
         return self._normalize_attribution(upsampled)
 
@@ -40,5 +40,5 @@ class GuidedGradCAMMethod(AttributionMethod):
         from models.architectures import get_target_layer
         target_layer = get_target_layer(model)
         ggc = GuidedGradCam(model, target_layer)
-        attribution = ggc.attribute(images, targets)
+        attribution = ggc.attribute(images, target=targets)
         return self._normalize_attribution(attribution)

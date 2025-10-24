@@ -42,9 +42,8 @@ class GradientSHAPMethod(AttributionMethod):
         attribution = gs.attribute(
             images,
             baselines=baseline,
-            n_samples=5,
-            stdevs=0.0,
-            target=targets
+            target=targets,
+            n_samples=5
         )
         return self._normalize_attribution(attribution)
 

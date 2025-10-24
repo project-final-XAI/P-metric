@@ -51,10 +51,10 @@ class SmoothGradMethod(AttributionMethod):
         nt = NoiseTunnel(saliency)
         attribution = nt.attribute(
             images, 
-            nt_type='smoothgrad', 
-            stdevs=0.1, 
-            n_samples=10, 
-            target=targets
+            target=targets,
+            nt_type='smoothgrad',
+            nt_samples=10,
+            stdevs=0.1
         )
         return self._normalize_attribution(attribution)
 
