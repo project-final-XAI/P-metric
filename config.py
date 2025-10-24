@@ -8,6 +8,8 @@ and XAI methods without altering the core logic.
 from pathlib import Path
 import torch
 
+
+
 # -----------------
 # Project Paths
 # -----------------
@@ -22,6 +24,7 @@ ANALYSIS_DIR = BASE_DIR / "results" / "analysis"
 # -----------------
 MAX_WORKERS = 4
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+HEATMAP_BATCH_SIZE = 4
 
 # -----------------
 # Dataset Configuration
