@@ -48,6 +48,10 @@ DATASET_CONFIG = {
     "imagenet": {
         "path": DATA_DIR / "imagenet",
         "num_classes": 1000
+    },
+    "SIPaKMeD": {
+        "path": DATA_DIR / "SIPaKMeD",
+        "num_classes": 5
     }
 }
 
@@ -65,7 +69,7 @@ GENERATING_MODELS = [
 JUDGING_MODELS = [
     "resnet50",
     # "vit_b_16",
-    "mobilenet_v2"
+    "mobilenet_v2",
     "swin_t",
 ]
 

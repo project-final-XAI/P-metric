@@ -15,8 +15,11 @@ from tqdm import tqdm
 import torch
 import logging
 from typing import Dict, List, Tuple, Any
+from collections import defaultdict
 
 from core.gpu_manager import GPUManager
+from core.file_manager import FileManager
+from core.progress_tracker import ProgressTracker
 from attribution.registry import get_attribution_method, get_all_methods
 from models.loader import load_model
 from data.loader import get_dataloader
@@ -36,10 +39,13 @@ class ExperimentRunner:
         self.gpu_manager = GPUManager()
         self.gpu_manager.print_info()
         
-        # Create directories
-        self.config.HEATMAP_DIR.mkdir(parents=True, exist_ok=True)
-        self.config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-        self.config.ANALYSIS_DIR.mkdir(parents=True, exist_ok=True)
+        # Initialize file manager for centralized file operations
+        self.file_manager = FileManager(config.BASE_DIR)
+        
+        # Create base directories
+        self.file_manager.ensure_dir_exists(self.file_manager.heatmap_dir)
+        self.file_manager.ensure_dir_exists(self.file_manager.results_dir)
+        self.file_manager.ensure_dir_exists(self.file_manager.analysis_dir)
         
         # Model cache to avoid reloading
         self._model_cache: Dict[str, torch.nn.Module] = {}
@@ -57,6 +63,8 @@ class ExperimentRunner:
             raise ValueError("ATTRIBUTION_METHODS cannot be empty")
         if not self.config.OCCLUSION_LEVELS:
             raise ValueError("OCCLUSION_LEVELS cannot be empty")
+        if not self.config.FILL_STRATEGIES:
+            raise ValueError("FILL_STRATEGIES cannot be empty")
     
     def _get_cached_model(self, model_name: str) -> torch.nn.Module:
         """Load model with caching."""
@@ -64,91 +72,58 @@ class ExperimentRunner:
             # logging.info(f"Loading model: {model_name}")
             self._model_cache[model_name] = load_model(model_name)
         return self._model_cache[model_name]
-    
-    def _load_existing_results(self) -> set:
-        """Load existing results from CSV and return set of completed work items."""
-        results_csv_path = self.config.RESULTS_DIR / "evaluation_results.csv"
-        completed = set()
-        
-        if not results_csv_path.exists():
-            logging.info("No existing results file found - starting fresh")
-            return completed
-        
-        try:
-            with open(results_csv_path, 'r', newline='') as f:
-                reader = csv.reader(f)
-                next(reader)  # Skip header
-                for row in reader:
-                    if len(row) >= 6:
-                        # Create tuple of (gen_model, method, img_id, judge_model, strategy, p_level)
-                        key = (row[0], row[1], row[2], row[3], row[4], float(row[5]))
-                        completed.add(key)
-            logging.info(f"Loaded {len(completed)} existing results from previous runs")
-        except Exception as e:
-            logging.warning(f"Error loading existing results: {e}")
-        
-        return completed
-    
-    def _append_results_to_csv(self, results: List[List], write_header: bool = False):
-        """Append batch of results to CSV without rewriting entire file."""
-        if not results:
-            return
-        
-        results_csv_path = self.config.RESULTS_DIR / "evaluation_results.csv"
-        csv_header = [
-            "generating_model", "attribution_method", "image_id", 
-            "judging_model", "fill_strategy", "occlusion_level", "is_correct"
-        ]
-        
-        mode = 'w' if write_header else 'a'
-        with open(results_csv_path, mode, newline='') as f:
-            writer = csv.writer(f)
-            if write_header:
-                writer.writerow(csv_header)
-            writer.writerows(results)
-        
-        logging.info(f"Appended {len(results)} new results to CSV")
         
     def run_phase_1(self, dataset_name: str):
         """Generate heatmaps for all model-method-image combinations."""
-        logging.info(f"Starting Phase 1 - Dataset: {dataset_name}")
-        logging.info(f"Models: {len(self.config.GENERATING_MODELS)}")
-        logging.info(f"Methods: {len(self.config.ATTRIBUTION_METHODS)}")
+        # Validate dataset name
+        if dataset_name not in self.config.DATASET_CONFIG:
+            raise ValueError(
+                f"Dataset '{dataset_name}' not found in DATASET_CONFIG. "
+                f"Available datasets: {list(self.config.DATASET_CONFIG.keys())}"
+            )
         
-        # Log storage configuration
-        if self.config.SAVE_HEATMAPS:
-            logging.info("Saving: Full heatmaps + sorted indices")
-        else:
-            logging.info("Saving: Sorted indices only")
+        logging.info(f"Starting Phase 1 - Dataset: {dataset_name}")
+        logging.info(f"Models: {len(self.config.GENERATING_MODELS)} | Methods: {len(self.config.ATTRIBUTION_METHODS)} | Storage: {'Full+Sorted' if self.config.SAVE_HEATMAPS else 'Sorted only'}")
         
         try:
+            # Ensure dataset heatmap directory exists
+            heatmap_dir = self.file_manager.get_heatmap_dir(dataset_name)
+            self.file_manager.ensure_dir_exists(heatmap_dir)
+            
             # Load dataset once
             dataloader = get_dataloader(dataset_name, batch_size=1, shuffle=False)
             image_label_map = {
                 f"image_{i:05d}": (img, lbl.item())
                 for i, (img, lbl) in enumerate(dataloader)
             }
-            logging.info(f"Loaded {len(image_label_map)} images")
             
-            # Process each model
-            for model_name in tqdm(self.config.GENERATING_MODELS, desc="Models",leave=False, position=0):
-                model = self._get_cached_model(model_name)
-                tqdm.write(f"{model_name}")
-                
-                for i, method_name in enumerate(self.config.ATTRIBUTION_METHODS):
-                    attribution_method = f"{i+1}/{len(self.config.ATTRIBUTION_METHODS)}  {method_name}"
-                    try:
-                        self._process_method_batch(model, model_name, method_name, image_label_map, attribution_method)
-                    except Exception as e:
-                        logging.error(f"Error processing {model_name}-{method_name}: {e}")
-                        continue
+            # Process each model with progress bar
+            total_combinations = len(self.config.GENERATING_MODELS) * len(self.config.ATTRIBUTION_METHODS)
+            with tqdm(total=total_combinations, desc="Phase 1 Progress", unit="combination", leave=True) as pbar:
+                for model_idx, model_name in enumerate(self.config.GENERATING_MODELS, 1):
+                    model = self._get_cached_model(model_name)
                     
-            logging.info(f"Heatmaps saved to: {self.config.HEATMAP_DIR}")
+                    for method_idx, method_name in enumerate(self.config.ATTRIBUTION_METHODS, 1):
+                        pbar.set_description(f"[{model_idx}/{len(self.config.GENERATING_MODELS)}] {model_name[:12]} | [{method_idx}/{len(self.config.ATTRIBUTION_METHODS)}] {method_name[:15]}")
+                        try:
+                            self._process_method_batch(
+                                model, model_name, method_name, 
+                                image_label_map, dataset_name
+                            )
+                        except Exception as e:
+                            logging.error(f"Error: {model_name}-{method_name}: {e}")
+                        finally:
+                            pbar.update(1)
+                    
+            logging.info(f"Heatmaps saved to: {heatmap_dir}")
         except Exception as e:
             logging.error(f"Phase 1 failed: {e}")
             raise
         
-    def _process_method_batch(self, model, model_name, method_name, image_label_map, attribution_method=""):
+    def _process_method_batch(
+        self, model, model_name, method_name, 
+        image_label_map, dataset_name
+    ):
         """Process a batch of images for specific model-method combination."""
         method = get_attribution_method(method_name)
         batch_size = self.gpu_manager.get_batch_size(method_name)
@@ -159,13 +134,18 @@ class ExperimentRunner:
         labels = []
         
         for img_id, (img, label) in image_label_map.items():
-            sorted_path = self.config.HEATMAP_DIR / f"{model_name}-{method_name}-{img_id}_sorted.npy"
+            # Use FileManager to get paths with dataset
+            sorted_path = self.file_manager.get_heatmap_path(
+                dataset_name, model_name, method_name, img_id, sorted=True
+            )
             
             # Check what files are required based on config
             files_missing = not sorted_path.exists()  # sorted indices always required
             
             if self.config.SAVE_HEATMAPS:
-                heatmap_path = self.config.HEATMAP_DIR / f"{model_name}-{method_name}-{img_id}.npy"
+                heatmap_path = self.file_manager.get_heatmap_path(
+                    dataset_name, model_name, method_name, img_id, sorted=False
+                )
                 files_missing = files_missing or not heatmap_path.exists()
             
             # Process if any required file is missing
@@ -175,12 +155,12 @@ class ExperimentRunner:
                 labels.append(label)
                 
         if not images_to_process:
-            # logging.info(f"{attribution_method} already processed")
             return
             
-        # Process in batches
+        # Process in batches with inner progress bar
         for i in tqdm(range(0, len(images_to_process), batch_size), 
-                      desc=attribution_method, leave=False, position=0):
+                      desc=f"  → Processing {len(images_to_process)} images", 
+                      leave=False, position=1, disable=len(images_to_process) < 10):
             end_idx = min(i + batch_size, len(images_to_process))
             
             # Concatenate images (they already have batch dim from dataloader)
@@ -202,13 +182,16 @@ class ExperimentRunner:
                     
                     # Save full heatmap only if requested (saves ~50% disk space if False)
                     if self.config.SAVE_HEATMAPS:
-                        heatmap_path = self.config.HEATMAP_DIR / f"{model_name}-{method_name}-{img_id}.npy"
+                        heatmap_path = self.file_manager.get_heatmap_path(
+                            dataset_name, model_name, method_name, img_id, sorted=False
+                        )
                         np.save(heatmap_path, heatmap_np)
                     
                     # Cache sorted pixel indices
-
                     sorted_indices = sort_pixels(heatmap_np)
-                    sorted_path = self.config.HEATMAP_DIR / f"{model_name}-{method_name}-{img_id}_sorted.npy"
+                    sorted_path = self.file_manager.get_heatmap_path(
+                        dataset_name, model_name, method_name, img_id, sorted=True
+                    )
                     np.save(sorted_path, sorted_indices)
                     
         # Clear GPU cache
@@ -217,60 +200,68 @@ class ExperimentRunner:
             
     def run_phase_2(self, dataset_name: str):
         """Evaluate heatmaps with occlusion."""
-        logging.info(f"Starting Phase 2 - Dataset: {dataset_name}")
+        # Validate dataset name
+        if dataset_name not in self.config.DATASET_CONFIG:
+            raise ValueError(
+                f"Dataset '{dataset_name}' not found in DATASET_CONFIG. "
+                f"Available datasets: {list(self.config.DATASET_CONFIG.keys())}"
+            )
+        
+        completed_str = ""
         
         try:
-            # Load existing results to enable resume
-            completed_work = self._load_existing_results()
-            write_header = len(completed_work) == 0  # Write header only if starting fresh
-            
-            # Load dataset and judging models
-            dataloader = get_dataloader(dataset_name, batch_size=1, shuffle=False)
-            image_label_map = {
-                f"image_{i:05d}": (img, lbl.item())
-                for i, (img, lbl) in enumerate(dataloader)
-            }
-            
-            judging_models = {
-                name: self._get_cached_model(name) for name in self.config.JUDGING_MODELS
-            }
-            
-            # Get only regular heatmap files, exclude sorted indices files
-            all_files = list(self.config.HEATMAP_DIR.glob("*.npy"))
-            heatmap_files = [f for f in all_files if not f.stem.endswith("_sorted")]
-            logging.info(f"Found {len(heatmap_files)} heatmaps to evaluate")
-            
-            if not heatmap_files:
-                logging.warning("No heatmaps found. Run Phase 1 first.")
-                return
-            
-            # Group heatmaps by generator and method for batch processing
-            heatmap_groups = self._group_heatmaps(heatmap_files)
-            
-            logging.info("Processing heatmap groups...")
-            for i, (group_key, group_files) in enumerate(heatmap_groups.items()):
-                try:
-                    group_name = f"{i+1}/{len(heatmap_groups)}  {group_key[0]}, {group_key[1]}:"
-                    results = self._evaluate_heatmap_batch(
-                        group_files, image_label_map, judging_models, 
-                        completed_work, group_name
-                    )
-                    
-                    # Write results incrementally after each group
-                    if results:
-                        self._append_results_to_csv(results, write_header=write_header)
-                        write_header = False  # Only write header once
-                        
-                        # Add new results to completed set to avoid duplicates
-                        for result in results:
-                            key = (result[0], result[1], result[2], result[3], result[4], result[5])
-                            completed_work.add(key)
-                    
-                except Exception as e:
-                    logging.error(f"Error processing group {group_key}: {e}")
-                    continue
+            # Initialize progress tracker for fast resume
+            with ProgressTracker(self.file_manager, dataset_name) as progress:
+                completed_count = progress.get_completed_count()
+                if completed_count > 0:
+                    completed_str = f" | Resuming: {completed_count:,} done"
                 
-            logging.info(f"Phase 2 complete! Results saved to: {self.config.RESULTS_DIR}")
+                logging.info(f"Starting Phase 2 - Dataset: {dataset_name}{completed_str}")
+                
+                # Load dataset and judging models
+                dataloader = get_dataloader(dataset_name, batch_size=1, shuffle=False)
+                image_label_map = {
+                    f"image_{i:05d}": (img, lbl.item())
+                    for i, (img, lbl) in enumerate(dataloader)
+                }
+                
+                judging_models = {
+                    name: self._get_cached_model(name) for name in self.config.JUDGING_MODELS
+                }
+                
+                # Get heatmap files for this dataset
+                heatmap_dir = self.file_manager.get_heatmap_dir(dataset_name)
+                if not heatmap_dir.exists():
+                    logging.warning(f"No heatmaps found for {dataset_name}. Run Phase 1 first.")
+                    return
+                
+                all_files = list(heatmap_dir.glob("*.npy"))
+                heatmap_files = [f for f in all_files if not f.stem.endswith("_sorted")]
+                
+                if not heatmap_files:
+                    logging.warning(f"No heatmaps found for {dataset_name}. Run Phase 1 first.")
+                    return
+                
+                # Group heatmaps by generator and method for batch processing
+                heatmap_groups = self._group_heatmaps(heatmap_files)
+                
+                # Process with progress bar
+                with tqdm(total=len(heatmap_groups), desc="Phase 2 Progress", unit="group", leave=True) as pbar:
+                    for i, (group_key, group_files) in enumerate(heatmap_groups.items(), 1):
+                        gen_model, method = group_key
+                        pbar.set_description(f"Phase 2 [{i}/{len(heatmap_groups)}] {gen_model[:10]}/{method[:12]}")
+                        try:
+                            self._evaluate_heatmap_batch(
+                                group_files, image_label_map, judging_models,
+                                progress, dataset_name, gen_model, method
+                            )
+                        except Exception as e:
+                            logging.error(f"Error processing {gen_model}-{method}: {e}")
+                        finally:
+                            pbar.update(1)
+                
+                result_dir = self.file_manager.get_result_dir(dataset_name)
+                logging.info(f"Phase 2 complete! Results saved to: {result_dir}")
         except Exception as e:
             logging.error(f"Phase 2 failed: {e}")
             raise
@@ -288,188 +279,308 @@ class ExperimentRunner:
                 groups[key].append(heatmap_path)
         return groups
     
-    def _evaluate_heatmap_batch(self, heatmap_paths: List[Path], image_label_map, judging_models, completed_work: set, group_name = ""):
+    def _evaluate_heatmap_batch(
+        self, heatmap_paths: List[Path], image_label_map,
+        judging_models, progress: ProgressTracker, 
+        dataset_name: str, gen_model: str, method: str
+    ):
         """Evaluate a batch of heatmaps (same generator and method) efficiently."""
-        results = []
-        batch_size = 8  # Process multiple images at once
+        # Prepare batch data once
+        batch_data = self._prepare_batch_data(heatmap_paths, image_label_map)
+        if not batch_data:
+            return
         
+        # Evaluate for each judge and strategy
+        for judge_name, judge_model in judging_models.items():
+            if judge_name == gen_model:
+                continue
+            
+            for strategy in self.config.FILL_STRATEGIES:
+                # Evaluate this specific combination
+                self._evaluate_strategy(
+                    batch_data, judge_model, judge_name, strategy,
+                    progress, dataset_name, gen_model, method
+                )
+    
+    def _prepare_batch_data(
+        self, heatmap_paths: List[Path], image_label_map
+    ) -> List[Dict]:
+        """Prepare batch data from heatmap paths."""
+        batch_data = []
+        for heatmap_path in heatmap_paths:
+            try:
+                parts = heatmap_path.stem.split('-')
+                gen_model, method, img_id = parts[0], parts[1], '-'.join(parts[2:])
+                
+                # Check if image exists in dataset
+                if img_id not in image_label_map:
+                    logging.warning(f"Image {img_id} not found in dataset, skipping heatmap {heatmap_path.name}")
+                    continue
+                
+                original_image, true_label = image_label_map[img_id]
+                
+                # Load cached sorted indices
+                sorted_path = heatmap_path.with_name(heatmap_path.stem + "_sorted.npy")
+                if sorted_path.exists():
+                    sorted_pixel_indices = np.load(sorted_path)
+                else:
+                    # Fallback: compute if not cached
+                    heatmap = np.load(heatmap_path)
+                    sorted_pixel_indices = sort_pixels(heatmap)
+                    logging.warning(f"Sorted indices not found for {heatmap_path.name}")
+                
+                batch_data.append({
+                    'gen_model': gen_model,
+                    'method': method,
+                    'img_id': img_id,
+                    'image': original_image,
+                    'label': true_label,
+                    'sorted_indices': sorted_pixel_indices
+                })
+            except Exception as e:
+                logging.warning(f"Error loading {heatmap_path}: {e}")
+                continue
+        
+        return batch_data
+    
+    def _evaluate_strategy(
+        self, batch_data: List[Dict], judge_model, judge_name: str,
+        strategy: str, progress: ProgressTracker, dataset_name: str,
+        gen_model: str, method: str
+    ):
+        """Evaluate a specific judge/strategy combination for all images."""
+        # Results grouped by occlusion level
+        results_by_level = defaultdict(list)
         total_skipped = 0
         total_processed = 0
         
-        for i in tqdm(range(0, len(heatmap_paths), batch_size), 
-                      desc=group_name, leave=False, position=0):
-            batch_paths = heatmap_paths[i:i+batch_size]
+        # Inner progress bar for occlusion levels (only if many levels)
+        show_inner = len(self.config.OCCLUSION_LEVELS) > 10
+        for p_level in tqdm(self.config.OCCLUSION_LEVELS, 
+                           desc=f"  → {judge_name[:8]}/{strategy[:6]}", 
+                           leave=False, position=2, disable=not show_inner):
+            # Process batch of images together
+            batch_images = []
+            batch_labels = []
+            batch_info = []
             
-            # Prepare batch data
-            batch_data = []
-            for heatmap_path in batch_paths:
+            for data in batch_data:
+                # Check if already completed
+                if progress.is_completed(
+                    data['gen_model'], data['method'], data['img_id'],
+                    judge_name, strategy, p_level
+                ):
+                    total_skipped += 1
+                    continue
+                
                 try:
-                    parts = heatmap_path.stem.split('-')
-                    gen_model, method, img_id = parts[0], parts[1], '-'.join(parts[2:])
-                    
-                    original_image, true_label = image_label_map[img_id]
-                    
-                    # Load cached sorted indices if available (much faster!)
-                    sorted_path = heatmap_path.with_name(heatmap_path.stem + "_sorted.npy")
-                    if sorted_path.exists():
-                        sorted_pixel_indices = np.load(sorted_path)
-                    else:
-                        # Fallback: compute if not cached
-                        heatmap = np.load(heatmap_path)
-                        sorted_pixel_indices = sort_pixels(heatmap)
-                        logging.warning(f"Sorted indices not found for {heatmap_path.name}, computing on-the-fly")
-                    
-                    batch_data.append({
-                        'gen_model': gen_model,
-                        'method': method,
-                        'img_id': img_id,
-                        'image': original_image,
-                        'label': true_label,
-                        'sorted_indices': sorted_pixel_indices
-                    })
+                    masked_image = apply_occlusion(
+                        image=data['image'][0],
+                        sorted_pixel_indices=data['sorted_indices'],
+                        occlusion_level=p_level,
+                        strategy=strategy
+                    )
+                    batch_images.append(masked_image)
+                    batch_labels.append(data['label'])
+                    batch_info.append(data)
                 except Exception as e:
-                    logging.warning(f"Error loading {heatmap_path}: {e}")
+                    logging.warning(f"Error applying occlusion: {e}")
                     continue
             
-            if not batch_data:
+            if not batch_images:
                 continue
             
-            # Evaluate for each judge, strategy, and level
-            for judge_name, judge_model in judging_models.items():
-                gen_model = batch_data[0]['gen_model']
-                if judge_name == gen_model:
+            # Evaluate batch
+            predictions = self._evaluate_batch(batch_images, judge_model)
+            
+            # Record results
+            for idx, (pred, info) in enumerate(zip(predictions, batch_info)):
+                # Skip invalid predictions (failed evaluations)
+                if pred is None or pred < 0:
+                    logging.error(f"Skipping invalid prediction for {info['img_id']} at level {p_level}")
                     continue
                 
-                for strategy in self.config.FILL_STRATEGIES:
-                    for p_level in self.config.OCCLUSION_LEVELS:
-                        # Process batch of images together
-                        batch_images = []
-                        batch_labels = []
-                        batch_info = []
-                        
-                        for data in batch_data:
-                            # Check if this specific evaluation already exists
-                            work_key = (data['gen_model'], data['method'], data['img_id'], 
-                                       judge_name, strategy, float(p_level))
-                            
-                            if work_key in completed_work:
-                                total_skipped += 1
-                                continue
-                            
-                            try:
-                                masked_image = apply_occlusion(
-                                    image=data['image'][0],
-                                    sorted_pixel_indices=data['sorted_indices'],
-                                    occlusion_level=p_level,
-                                    strategy=strategy
-                                )
-                                batch_images.append(masked_image)
-                                batch_labels.append(data['label'])
-                                batch_info.append(data)
-                            except Exception as e:
-                                logging.warning(f"Error applying occlusion: {e}")
-                                continue
-                        
-                        if not batch_images:
-                            continue
-                        
-                        # Stack and evaluate in batch with mixed precision
-                        try:
-                            batch_tensor = torch.stack(batch_images).to(self.config.DEVICE)
-                            
-                            with torch.no_grad():
-                                # Use FP16 for faster inference 
-                                if self.config.DEVICE == "cuda":
-                                    with torch.amp.autocast(self.config.DEVICE):
-                                        outputs = judge_model(batch_tensor)
-                                else:
-                                    outputs = judge_model(batch_tensor)
-                                    
-                                if isinstance(outputs, tuple):
-                                    outputs = outputs[0]
-                                if isinstance(outputs, dict):
-                                    outputs = outputs['logits']
-                                predictions = torch.argmax(outputs, dim=1).cpu().numpy()
-                            
-                            # Record results
-                            for idx, (pred, info) in enumerate(zip(predictions, batch_info)):
-                                is_correct = 1 if pred == batch_labels[idx] else 0
-                                results.append([
-                                    info['gen_model'], info['method'], info['img_id'], 
-                                    judge_name, strategy, p_level, is_correct
-                                ])
-                                total_processed += 1
-                        except Exception as e:
-                            logging.warning(f"Batch evaluation error: {e}, falling back to single")
-                            # Fallback to single evaluation
-                            for idx, info in enumerate(batch_info):
-                                try:
-                                    masked_image = batch_images[idx].unsqueeze(0).to(self.config.DEVICE)
-                                    
-                                    # Evaluate with FP16 if available
-                                    with torch.no_grad():
-                                        if self.config.DEVICE == "cuda":
-                                            with torch.amp.autocast(self.config.DEVICE):
-                                                outputs = judge_model(masked_image)
-                                        else:
-                                            outputs = judge_model(masked_image)
-                                        
-                                        if isinstance(outputs, tuple):
-                                            outputs = outputs[0]
-                                        if isinstance(outputs, dict):
-                                            outputs = outputs['logits']
-                                        pred = torch.argmax(outputs, dim=1).item()
-                                        is_correct = 1 if pred == batch_labels[idx] else 0
-                                    results.append([
-                                        info['gen_model'], info['method'], info['img_id'], 
-                                        judge_name, strategy, p_level, is_correct
-                                    ])
-                                    total_processed += 1
-                                except Exception as e2:
-                                    logging.warning(f"Single evaluation failed: {e2}")
-                                    continue
-        
-        # Log summary of work done
-        if total_skipped > 0 or total_processed > 0:
-            logging.info(f"Group complete: {total_processed} new evaluations, {total_skipped} already completed (skipped)")
-        
-        return results
-    
-    def run_phase_3(self):
-        """Run analysis and visualization."""
-        logging.info("Starting Phase 3 - Analysis and visualization")
-        
-        try:
-            # Load results
-            results_csv_path = self.config.RESULTS_DIR / "evaluation_results.csv"
-            if not results_csv_path.exists():
-                logging.error(f"Results file not found at {results_csv_path}")
-                return
+                is_correct = 1 if pred == batch_labels[idx] else 0
+                results_by_level[p_level].append([
+                    info['img_id'], p_level, is_correct
+                ])
                 
-            import pandas as pd
-            df = pd.read_csv(results_csv_path)
+                # Mark as completed in progress tracker
+                progress.mark_completed(
+                    info['gen_model'], info['method'], info['img_id'],
+                    judge_name, strategy, p_level
+                )
+                total_processed += 1
+        
+        # Save results to file
+        if results_by_level:
+            self._save_strategy_results(
+                results_by_level, dataset_name, gen_model,
+                judge_name, method, strategy
+            )
+            progress.save()  # Save progress after each strategy
+    
+    def _evaluate_batch(
+        self, batch_images: List[torch.Tensor], judge_model
+    ) -> np.ndarray:
+        """Evaluate a batch of images with the judging model."""
+        try:
+            batch_tensor = torch.stack(batch_images).to(self.config.DEVICE)
             
-            if df.empty:
-                logging.warning("Results CSV is empty")
+            with torch.no_grad():
+                # Use FP16 for faster inference
+                if self.config.DEVICE == "cuda":
+                    with torch.amp.autocast(self.config.DEVICE):
+                        outputs = judge_model(batch_tensor)
+                else:
+                    outputs = judge_model(batch_tensor)
+                
+                if isinstance(outputs, tuple):
+                    outputs = outputs[0]
+                if isinstance(outputs, dict):
+                    outputs = outputs['logits']
+                predictions = torch.argmax(outputs, dim=1).cpu().numpy()
+            
+            return predictions
+        except Exception as e:
+            logging.warning(f"Batch evaluation error: {e}, falling back to single")
+            # Fallback to single evaluation
+            predictions = []
+            for img in batch_images:
+                try:
+                    single_tensor = img.unsqueeze(0).to(self.config.DEVICE)
+                    with torch.no_grad():
+                        if self.config.DEVICE == "cuda":
+                            with torch.amp.autocast(self.config.DEVICE):
+                                outputs = judge_model(single_tensor)
+                        else:
+                            outputs = judge_model(single_tensor)
+                        
+                        if isinstance(outputs, tuple):
+                            outputs = outputs[0]
+                        if isinstance(outputs, dict):
+                            outputs = outputs['logits']
+                        pred = torch.argmax(outputs, dim=1).item()
+                    predictions.append(pred)
+                except Exception as e2:
+                    logging.warning(f"Single evaluation failed: {e2}")
+                    predictions.append(None)  # Invalid prediction marker
+            return np.array(predictions, dtype=object)
+    
+    def _save_strategy_results(
+        self, results_by_level: Dict, dataset_name: str,
+        gen_model: str, judge_model: str, method: str, strategy: str
+    ):
+        """Save results for a specific strategy to CSV file."""
+        # Get file path
+        result_file = self.file_manager.get_result_file_path(
+            dataset_name, gen_model, judge_model, method, strategy
+        )
+        
+        # Flatten results
+        all_results = []
+        for level in sorted(results_by_level.keys()):
+            all_results.extend(results_by_level[level])
+        
+        # Save to CSV (append mode if file exists)
+        header = ["image_id", "occlusion_level", "is_correct"]
+        self.file_manager.save_csv(
+            result_file, all_results, header=header, append=result_file.exists()
+        )
+    
+    def run_phase_3(self, dataset_name: str = None):
+        """
+        Run analysis and visualization.
+        
+        Args:
+            dataset_name: If specified, analyze only this dataset.
+                         If None, analyze all datasets.
+        """
+        try:
+            import pandas as pd
+            
+            # Determine which datasets to analyze
+            if dataset_name:
+                datasets = [dataset_name]
+            else:
+                # Check if results directory exists
+                if not self.file_manager.results_dir.exists():
+                    logging.error(f"Results directory does not exist: {self.file_manager.results_dir}")
+                    return
+                
+                # Find all datasets with results
+                datasets = [
+                    d.name for d in self.file_manager.results_dir.iterdir()
+                    if d.is_dir() and not d.name.startswith('.')
+                ]
+            
+            if not datasets:
+                logging.error("No result datasets found")
                 return
+            
+            logging.info(f"Starting Phase 3 - Analyzing: {', '.join(datasets)}")
+            
+            # Load all results from file structure
+            all_data = []
+            for dataset in datasets:
+                result_files = self.file_manager.scan_result_files(dataset)
+                
+                for result_file in result_files:
+                    # Parse file path to get parameters
+                    params = self.file_manager.parse_result_file_path(result_file, dataset)
+                    if not params:
+                        continue
+                    
+                    # Load CSV data
+                    rows = self.file_manager.load_csv(result_file, skip_header=True)
+                    
+                    # Add metadata to each row
+                    for row in rows:
+                        if len(row) >= 3:
+                            try:
+                                all_data.append({
+                                    'dataset': dataset,
+                                    'generating_model': params['gen_model'],
+                                    'attribution_method': params['method'],
+                                    'judging_model': params['judge_model'],
+                                    'fill_strategy': params['strategy'],
+                                    'image_id': row[0],
+                                    'occlusion_level': float(row[1]),
+                                    'is_correct': int(row[2])
+                                })
+                            except (ValueError, TypeError) as e:
+                                logging.warning(f"Skipping corrupted row in {result_file}: {row} - {e}")
+                                continue
+            
+            if not all_data:
+                logging.warning("No results data found")
+                return
+            
+            # Create DataFrame
+            df = pd.DataFrame(all_data)
             
             # Calculate aggregated accuracy
             group_cols = [
-                "generating_model", "attribution_method", "judging_model",
-                "fill_strategy", "occlusion_level"
+                "dataset", "generating_model", "attribution_method",
+                "judging_model", "fill_strategy", "occlusion_level"
             ]
             agg_df = df.groupby(group_cols)['is_correct'].mean().reset_index()
             agg_df.rename(columns={'is_correct': 'mean_accuracy'}, inplace=True)
             
             # Calculate metrics
             metrics_list = []
-            curve_group_cols = ["generating_model", "attribution_method", "judging_model", "fill_strategy"]
+            curve_group_cols = [
+                "dataset", "generating_model", "attribution_method",
+                "judging_model", "fill_strategy"
+            ]
             
             for name, curve_df in agg_df.groupby(curve_group_cols):
                 try:
-                    gen_model, method, judge_model, fill_strat = name
+                    dataset, gen_model, method, judge_model, fill_strat = name
                     
-                    baseline_acc = curve_df[curve_df['occlusion_level'] == 0]['mean_accuracy'].iloc[0] if 0 in curve_df['occlusion_level'].values else 1.0
+                    baseline_acc = 1.0
+                    if 0 in curve_df['occlusion_level'].values:
+                        baseline_acc = curve_df[curve_df['occlusion_level'] == 0]['mean_accuracy'].iloc[0]
                     
                     accuracies = curve_df['mean_accuracy'].tolist()
                     levels = curve_df['occlusion_level'].tolist()
@@ -478,6 +589,7 @@ class ExperimentRunner:
                     drop75 = calculate_drop(accuracies, levels, initial_accuracy=baseline_acc, drop_level=75)
                     
                     metrics_list.append({
+                        "dataset": dataset,
                         "generating_model": gen_model,
                         "attribution_method": method,
                         "judging_model": judge_model,
@@ -488,22 +600,31 @@ class ExperimentRunner:
                 except Exception as e:
                     logging.warning(f"Error calculating metrics for {name}: {e}")
                     continue
-                
+            
             # Save results
             metrics_df = pd.DataFrame(metrics_list)
-            agg_output_path = self.config.ANALYSIS_DIR / "aggregated_accuracy_curves.csv"
-            metrics_output_path = self.config.ANALYSIS_DIR / "faithfulness_metrics.csv"
+            agg_output_path = self.file_manager.analysis_dir / "aggregated_accuracy_curves.csv"
+            metrics_output_path = self.file_manager.analysis_dir / "faithfulness_metrics.csv"
             
             agg_df.to_csv(agg_output_path, index=False)
             metrics_df.to_csv(metrics_output_path, index=False)
             
-            # Generate plots
-            plot_accuracy_degradation_curves(agg_df, output_dir=self.config.ANALYSIS_DIR)
+            # Generate plots per dataset
+            for dataset in datasets:
+                dataset_df = agg_df[agg_df['dataset'] == dataset].copy()
+                if not dataset_df.empty:
+                    # Create dataset-specific output directory
+                    dataset_analysis_dir = self.file_manager.analysis_dir / dataset
+                    self.file_manager.ensure_dir_exists(dataset_analysis_dir)
+                    
+                    plot_accuracy_degradation_curves(
+                        dataset_df, output_dir=dataset_analysis_dir
+                    )
+                    plot_fill_strategy_comparison(
+                        dataset_df, output_dir=dataset_analysis_dir
+                    )
             
-            # Generate fill strategy comparison plot
-            plot_fill_strategy_comparison(agg_df, output_dir=self.config.ANALYSIS_DIR)
-            
-            logging.info(f"Analysis complete! Results saved to {self.config.ANALYSIS_DIR}")
+            logging.info(f"Phase 3 complete! Results → {self.file_manager.analysis_dir}")
         except Exception as e:
             logging.error(f"Phase 3 failed: {e}")
             raise

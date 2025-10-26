@@ -2,7 +2,8 @@
 Run Phase 3: Analysis and Visualization.
 
 Usage:
-    python scripts/run_phase3.py
+    python scripts/run_phase3.py                    # Analyze all datasets
+    python scripts/run_phase3.py --dataset imagenet # Analyze specific dataset
 """
 
 import argparse
@@ -13,6 +14,11 @@ import config
 
 def main():
     parser = argparse.ArgumentParser(description="Run Phase 3: Analysis and Visualization")
+    parser.add_argument(
+        '--dataset',
+        default=None,
+        help='Dataset name (if not specified, analyzes all datasets)'
+    )
     args = parser.parse_args()
     
     logging.info("=" * 60)
@@ -21,7 +27,7 @@ def main():
     
     try:
         runner = ExperimentRunner(config)
-        runner.run_phase_3()
+        runner.run_phase_3(dataset_name=args.dataset)
         logging.info("Phase 3 complete!")
     except Exception as e:
         logging.error(f"Phase 3 failed: {e}")
