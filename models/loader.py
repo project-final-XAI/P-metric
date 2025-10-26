@@ -8,7 +8,7 @@ import timm
 import torch
 import torch.nn as nn
 import torchvision.models as models
-from config import DEVICE
+from config import DEVICE, USE_TORCH_COMPILE
 import logging
 
 
@@ -39,11 +39,21 @@ def load_model(model_name: str) -> nn.Module:
 
     # Move to device (works for both CPU and GPU)
     model = model.to(DEVICE)
+    
+    # Apply torch.compile for faster inference on Transformers (PyTorch 2.0+)
+    if USE_TORCH_COMPILE and DEVICE == "cuda" and hasattr(torch, 'compile'):
+        try:
+            model = torch.compile(model, mode='max-autotune')
+            logging.info(f"Applied torch.compile to {model_name}")
+        except Exception as e:
+            logging.warning(f"torch.compile failed for {model_name}: {e}")
+    
     model.eval()
     
-    # Disable gradients for inference
+    # Keep gradients enabled for attribution methods
+    # Attribution methods need to compute gradients w.r.t. input
     for param in model.parameters():
-        param.requires_grad = False
+        param.requires_grad = True
     
     return model
 
