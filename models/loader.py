@@ -39,11 +39,13 @@ def load_model(model_name: str) -> nn.Module:
 
     # Move to device (works for both CPU and GPU)
     model = model.to(DEVICE)
+    
     model.eval()
     
-    # Disable gradients for inference
+    # Keep gradients enabled for attribution methods
+    # Attribution methods need to compute gradients w.r.t. input
     for param in model.parameters():
-        param.requires_grad = False
+        param.requires_grad = True
     
     return model
 

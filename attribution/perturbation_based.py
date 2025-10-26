@@ -21,7 +21,7 @@ class OcclusionMethod(AttributionMethod):
     def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute Occlusion attribution."""
         occlusion = Occlusion(model)
-        sliding_window_shapes = (3, 15, 15)
+        sliding_window_shapes = (3, 20, 20)
         strides = (3, 16, 16)
         
         attribution = occlusion.attribute(

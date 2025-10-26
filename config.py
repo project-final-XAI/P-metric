@@ -39,7 +39,7 @@ HEATMAP_BATCH_SIZE = 4
 # Save full heatmaps (True) or only sorted indices (False)
 # Setting to False saves ~50% disk space (~4GB for 22K heatmaps)
 # but you won't be able to visualize heatmaps or do further analysis
-SAVE_HEATMAPS = True
+SAVE_HEATMAPS = False
 
 # -----------------
 # Dataset Configuration

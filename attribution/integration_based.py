@@ -23,7 +23,7 @@ class IntegratedGradientsMethod(AttributionMethod):
         attribution = ig.attribute(
             images, 
             target=targets, 
-            n_steps=20,
+            n_steps=10,  
             baselines=torch.zeros_like(images)
         )
         return self._normalize_attribution(attribution)
@@ -43,7 +43,7 @@ class GradientSHAPMethod(AttributionMethod):
             images,
             baselines=baseline,
             target=targets,
-            n_samples=5
+            n_samples=3
         )
         return self._normalize_attribution(attribution)
 

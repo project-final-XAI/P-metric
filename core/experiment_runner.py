@@ -61,7 +61,7 @@ class ExperimentRunner:
     def _get_cached_model(self, model_name: str) -> torch.nn.Module:
         """Load model with caching."""
         if model_name not in self._model_cache:
-            logging.info(f"Loading model: {model_name}")
+            # logging.info(f"Loading model: {model_name}")
             self._model_cache[model_name] = load_model(model_name)
         return self._model_cache[model_name]
     
@@ -131,8 +131,9 @@ class ExperimentRunner:
             logging.info(f"Loaded {len(image_label_map)} images")
             
             # Process each model
-            for model_name in tqdm(self.config.GENERATING_MODELS, desc="Models", position=1, leave=True):
+            for model_name in tqdm(self.config.GENERATING_MODELS, desc="Models",leave=False, position=0):
                 model = self._get_cached_model(model_name)
+                tqdm.write(f"{model_name}")
                 
                 for i, method_name in enumerate(self.config.ATTRIBUTION_METHODS):
                     attribution_method = f"{i+1}/{len(self.config.ATTRIBUTION_METHODS)}  {method_name}"
@@ -174,7 +175,7 @@ class ExperimentRunner:
                 labels.append(label)
                 
         if not images_to_process:
-            logging.info(f"{attribution_method} already processed")
+            # logging.info(f"{attribution_method} already processed")
             return
             
         # Process in batches
@@ -234,8 +235,9 @@ class ExperimentRunner:
                 name: self._get_cached_model(name) for name in self.config.JUDGING_MODELS
             }
             
-            # Get heatmap files
-            heatmap_files = list(self.config.HEATMAP_DIR.glob("*.npy"))
+            # Get only regular heatmap files, exclude sorted indices files
+            all_files = list(self.config.HEATMAP_DIR.glob("*.npy"))
+            heatmap_files = [f for f in all_files if not f.stem.endswith("_sorted")]
             logging.info(f"Found {len(heatmap_files)} heatmaps to evaluate")
             
             if not heatmap_files:
