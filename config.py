@@ -34,13 +34,6 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 HEATMAP_BATCH_SIZE = 4
 
 # -----------------
-# Optimization Flags
-# -----------------
-# Enable torch.compile for faster Transformer inference (PyTorch 2.0+)
-# First run will be slower due to compilation, but subsequent runs will be faster
-USE_TORCH_COMPILE = True
-
-# -----------------
 # Storage Optimization
 # -----------------
 # Save full heatmaps (True) or only sorted indices (False)

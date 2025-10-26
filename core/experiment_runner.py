@@ -235,8 +235,9 @@ class ExperimentRunner:
                 name: self._get_cached_model(name) for name in self.config.JUDGING_MODELS
             }
             
-            # Get heatmap files
-            heatmap_files = list(self.config.HEATMAP_DIR.glob("*.npy"))
+            # Get only regular heatmap files, exclude sorted indices files
+            all_files = list(self.config.HEATMAP_DIR.glob("*.npy"))
+            heatmap_files = [f for f in all_files if not f.stem.endswith("_sorted")]
             logging.info(f"Found {len(heatmap_files)} heatmaps to evaluate")
             
             if not heatmap_files:
