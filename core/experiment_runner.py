@@ -131,7 +131,7 @@ class ExperimentRunner:
             logging.info(f"Loaded {len(image_label_map)} images")
             
             # Process each model
-            for model_name in tqdm(self.config.GENERATING_MODELS, desc="Models"):
+            for model_name in tqdm(self.config.GENERATING_MODELS, desc="Models", position=1, leave=True):
                 model = self._get_cached_model(model_name)
                 
                 for i, method_name in enumerate(self.config.ATTRIBUTION_METHODS):
@@ -174,11 +174,12 @@ class ExperimentRunner:
                 labels.append(label)
                 
         if not images_to_process:
-            print("already processed")
+            logging.info(f"{attribution_method} already processed")
             return
             
         # Process in batches
-        for i in tqdm(range(0, len(images_to_process), batch_size), desc=attribution_method):
+        for i in tqdm(range(0, len(images_to_process), batch_size), 
+                      desc=attribution_method, leave=False, position=0):
             end_idx = min(i + batch_size, len(images_to_process))
             
             # Concatenate images (they already have batch dim from dataloader)
@@ -244,7 +245,7 @@ class ExperimentRunner:
             # Group heatmaps by generator and method for batch processing
             heatmap_groups = self._group_heatmaps(heatmap_files)
             
-            print("Processing groups:")
+            logging.info("Processing heatmap groups...")
             for i, (group_key, group_files) in enumerate(heatmap_groups.items()):
                 try:
                     group_name = f"{i+1}/{len(heatmap_groups)}  {group_key[0]}, {group_key[1]}:"
@@ -293,7 +294,8 @@ class ExperimentRunner:
         total_skipped = 0
         total_processed = 0
         
-        for i in tqdm(range(0, len(heatmap_paths), batch_size), desc=group_name):
+        for i in tqdm(range(0, len(heatmap_paths), batch_size), 
+                      desc=group_name, leave=False, position=0):
             batch_paths = heatmap_paths[i:i+batch_size]
             
             # Prepare batch data
