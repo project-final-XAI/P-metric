@@ -84,9 +84,8 @@ class ExperimentRunner:
             for model_name in tqdm(self.config.GENERATING_MODELS, desc="Models"):
                 model = self._get_cached_model(model_name)
                 
-                for method_name in tqdm(self.config.ATTRIBUTION_METHODS, 
-                                        desc=f"{model_name}", 
-                                        leave=False):
+                for i, method_name in enumerate(self.config.ATTRIBUTION_METHODS):
+                    print(f"{i+1}/{len(self.config.ATTRIBUTION_METHODS)}  {method_name}:", end=" ")
                     try:
                         self._process_method_batch(model, model_name, method_name, image_label_map)
                     except Exception as e:
@@ -117,10 +116,11 @@ class ExperimentRunner:
                 labels.append(label)
                 
         if not images_to_process:
+            print("already processed")
             return
             
         # Process in batches
-        for i in range(0, len(images_to_process), batch_size):
+        for i in tqdm(range(0, len(images_to_process), batch_size)):
             end_idx = min(i + batch_size, len(images_to_process))
             
             # Concatenate images (they already have batch dim from dataloader)
@@ -169,9 +169,11 @@ class ExperimentRunner:
             heatmap_groups = self._group_heatmaps(heatmap_files)
             
             all_results = []
-            for group_key, group_files in tqdm(heatmap_groups.items(), desc="Processing groups"):
+            print("Processing groups:")
+            for i, (group_key, group_files) in enumerate(heatmap_groups.items()):
                 try:
-                    results = self._evaluate_heatmap_batch(group_files, image_label_map, judging_models)
+                    group_name = f"{i+1}/{len(heatmap_groups)}  {group_key[0]}, {group_key[1]}:"
+                    results = self._evaluate_heatmap_batch(group_files, image_label_map, judging_models, group_name)
                     all_results.extend(results)
                 except Exception as e:
                     logging.error(f"Error processing group {group_key}: {e}")
@@ -197,12 +199,12 @@ class ExperimentRunner:
                 groups[key].append(heatmap_path)
         return groups
     
-    def _evaluate_heatmap_batch(self, heatmap_paths: List[Path], image_label_map, judging_models):
+    def _evaluate_heatmap_batch(self, heatmap_paths: List[Path], image_label_map, judging_models, group_name = ""):
         """Evaluate a batch of heatmaps (same generator and method) efficiently."""
         results = []
         batch_size = 8  # Process multiple images at once
         
-        for i in range(0, len(heatmap_paths), batch_size):
+        for i in tqdm(range(0, len(heatmap_paths), batch_size), desc=group_name):
             batch_paths = heatmap_paths[i:i+batch_size]
             
             # Prepare batch data

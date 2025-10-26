@@ -15,11 +15,9 @@ def main():
     parser = argparse.ArgumentParser(description="Run Full CROSS-XAI Experiment")
     parser.add_argument('--dataset', default='imagenet', help='Dataset name')
     args = parser.parse_args()
-    
-    logging.info("=" * 60)
+
     logging.info("CROSS-XAI FULL EXPERIMENT")
     logging.info(f"Dataset: {args.dataset}")
-    logging.info("=" * 60)
     
     try:
         runner = ExperimentRunner(config)

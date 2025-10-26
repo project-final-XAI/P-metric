@@ -6,7 +6,6 @@ Handles progressive pixel occlusion and fill strategies.
 
 import numpy as np
 import torch
-import logging
 from typing import Tuple, Dict, Callable
 from functools import partial
 from torchvision import transforms
@@ -109,6 +108,10 @@ def apply_occlusion(
     if num_pixels_to_occlude == 0:
         return image.clone()
 
+
+    # Move the image to the same device as the torch (GPU obviously..), by the way - that BUG cost me something like 45 minute so a lot of respect to him
+    image = image.to(DEVICE)
+
     # Select least important pixels to occlude
     pixels_to_occlude_flat = sorted_pixel_indices[:num_pixels_to_occlude]
 
@@ -144,7 +147,7 @@ def evaluate_judging_model(
     """
     with torch.no_grad():
         output = judging_model(masked_image)
-        
+
         # Handle different output formats
         if isinstance(output, tuple):
             output = output[0]
@@ -154,4 +157,3 @@ def evaluate_judging_model(
         prediction = torch.argmax(output, dim=1).item()
 
     return 1 if prediction == true_label else 0
-

@@ -5,10 +5,17 @@ Edit this file to change experiment parameters like models, datasets,
 and XAI methods without altering the core logic.
 """
 
+
+# The code crush some time - why? I don't know!! butttt this line make the code works so its make me happy - so pls even if you are very curious what will happen if you will delete this line - get over this, thx ;)
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+# Some time there is some warns - again, why? I don't know!! but I don't like them so that's line of code make them gone
+import  warnings
+warnings.filterwarnings("ignore")
+
 from pathlib import Path
 import torch
-
-
 
 # -----------------
 # Project Paths
@@ -42,15 +49,15 @@ DATASET_CONFIG = {
 GENERATING_MODELS = [
     "resnet50",
     "mobilenet_v2", 
-    "vgg16",
-    "vit_b_16",
-    "swin_t",
+    # "vgg16",
+    # "vit_b_16",
+    # "swin_t",
 ]
 
 JUDGING_MODELS = [
     "resnet50",
     "vit_b_16",
-    "swin_t",
+    # "swin_t",
 ]
 
 # -----------------
@@ -62,8 +69,8 @@ ATTRIBUTION_METHODS = [
     "smoothgrad",
     "guided_backprop",
     "integrated_gradients",
-    "gradientshap",
     "occlusion",
+    "gradientshap",
     "xrai",
     "grad_cam",
     "guided_gradcam",
@@ -78,8 +85,8 @@ OCCLUSION_LEVELS = list(range(5, 100, 5))
 FILL_STRATEGIES = [
     "gray",
     "blur",
-    "random_noise",
-    "black",
-    "mean",
-    "white",
+    # "random_noise",
+    # "black",
+    # "mean",
+    # "white",
 ]
