@@ -34,6 +34,14 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 HEATMAP_BATCH_SIZE = 4
 
 # -----------------
+# Storage Optimization
+# -----------------
+# Save full heatmaps (True) or only sorted indices (False)
+# Setting to False saves ~50% disk space (~4GB for 22K heatmaps)
+# but you won't be able to visualize heatmaps or do further analysis
+SAVE_HEATMAPS = True
+
+# -----------------
 # Dataset Configuration
 # -----------------
 DATASET_CONFIG = {
@@ -50,14 +58,15 @@ GENERATING_MODELS = [
     "resnet50",
     "mobilenet_v2", 
     # "vgg16",
-    # "vit_b_16",
+    "vit_b_16",
     # "swin_t",
 ]
 
 JUDGING_MODELS = [
     "resnet50",
-    "vit_b_16",
-    # "swin_t",
+    # "vit_b_16",
+    "mobilenet_v2"
+    "swin_t",
 ]
 
 # -----------------
@@ -85,8 +94,8 @@ OCCLUSION_LEVELS = list(range(5, 100, 5))
 FILL_STRATEGIES = [
     "gray",
     "blur",
-    # "random_noise",
-    # "black",
+    "random_noise",
+    "black",
     # "mean",
     # "white",
 ]
