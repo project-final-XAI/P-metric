@@ -28,12 +28,12 @@ def load_model(model_name: str) -> nn.Module:
     try:
         # Try torchvision first
         model = models.get_model(model_name, weights="IMAGENET1K_V1")
-        logging.info(f"Loaded {model_name} from torchvision")
+        # logging.info(f"Loaded {model_name} from torchvision")
     except Exception as e:
         try:
             # Try timm for ViT, Swin-T, etc.
             model = timm.create_model(model_name, pretrained=True)
-            logging.info(f"Loaded {model_name} from timm")
+            # logging.info(f"Loaded {model_name} from timm")
         except Exception as e2:
             raise ValueError(f"Model '{model_name}' not found in torchvision or timm: {e}, {e2}")
 

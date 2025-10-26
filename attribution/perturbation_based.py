@@ -22,7 +22,7 @@ class OcclusionMethod(AttributionMethod):
         """Compute Occlusion attribution."""
         occlusion = Occlusion(model)
         sliding_window_shapes = (3, 15, 15)
-        strides = (3, 8, 8)
+        strides = (3, 16, 16)
         
         attribution = occlusion.attribute(
             images,

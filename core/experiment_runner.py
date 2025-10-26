@@ -135,7 +135,7 @@ class ExperimentRunner:
                 model = self._get_cached_model(model_name)
                 
                 for i, method_name in enumerate(self.config.ATTRIBUTION_METHODS):
-                    attribution_method = f"{i+1}/{len(self.config.ATTRIBUTION_METHODS)}  {method_name}:"
+                    attribution_method = f"{i+1}/{len(self.config.ATTRIBUTION_METHODS)}  {method_name}"
                     try:
                         self._process_method_batch(model, model_name, method_name, image_label_map, attribution_method)
                     except Exception as e:

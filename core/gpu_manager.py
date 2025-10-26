@@ -38,7 +38,7 @@ class GPUManager:
             "guided_backprop": 16,
             "integrated_gradients": 4,
             "gradientshap": 2,
-            "occlusion": 8,
+            "occlusion": 12,
             "xrai": 1,
             "grad_cam": 8,
             "guided_gradcam": 8,
