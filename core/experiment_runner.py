@@ -27,8 +27,15 @@ from evaluation.occlusion import sort_pixels, apply_occlusion, evaluate_judging_
 from evaluation.metrics import calculate_auc, calculate_drop
 from visualization.plotter import plot_accuracy_degradation_curves, plot_fill_strategy_comparison
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Setup logging (separate from tqdm stdout)
+import sys
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stderr)]
+)
+
+
 
 
 class ExperimentRunner:
@@ -99,7 +106,7 @@ class ExperimentRunner:
             
             # Process each model with progress bar
             total_combinations = len(self.config.GENERATING_MODELS) * len(self.config.ATTRIBUTION_METHODS)
-            with tqdm(total=total_combinations, desc="Phase 1 Progress", unit="combination", leave=True) as pbar:
+            with tqdm(total=total_combinations, desc="Phase 1 Progress") as pbar:
                 for model_idx, model_name in enumerate(self.config.GENERATING_MODELS, 1):
                     model = self._get_cached_model(model_name)
                     
@@ -158,12 +165,11 @@ class ExperimentRunner:
             return
             
         # Process in batches with inner progress bar
-        for i in tqdm(range(0, len(images_to_process), batch_size), 
-                      desc=f"  → Processing {len(images_to_process)} images", 
-                      leave=False, position=1, disable=len(images_to_process) < 10):
+        for i in tqdm(range(0, len(images_to_process), batch_size),
+                      desc=f"  → Processing {len(images_to_process)} images", dynamic_ncols=True):
             end_idx = min(i + batch_size, len(images_to_process))
             
-            # Concatenate images (they already have batch dim from dataloader)
+            # Concatenate images
             batch_images = torch.cat(images_to_process[i:end_idx], dim=0).to(self.config.DEVICE)
             batch_labels = torch.tensor(labels[i:end_idx]).to(self.config.DEVICE)
             
@@ -236,7 +242,7 @@ class ExperimentRunner:
                     return
                 
                 all_files = list(heatmap_dir.glob("*.npy"))
-                heatmap_files = [f for f in all_files if not f.stem.endswith("_sorted")]
+                heatmap_files = [f for f in all_files if f.stem.endswith("_sorted")]
                 
                 if not heatmap_files:
                     logging.warning(f"No heatmaps found for {dataset_name}. Run Phase 1 first.")
@@ -311,6 +317,9 @@ class ExperimentRunner:
             try:
                 parts = heatmap_path.stem.split('-')
                 gen_model, method, img_id = parts[0], parts[1], '-'.join(parts[2:])
+
+                if img_id.endswith('_sorted'):
+                    img_id = img_id[:-len('_sorted')]
                 
                 # Check if image exists in dataset
                 if img_id not in image_label_map:
@@ -320,15 +329,15 @@ class ExperimentRunner:
                 original_image, true_label = image_label_map[img_id]
                 
                 # Load cached sorted indices
-                sorted_path = heatmap_path.with_name(heatmap_path.stem + "_sorted.npy")
-                if sorted_path.exists():
-                    sorted_pixel_indices = np.load(sorted_path)
-                else:
-                    # Fallback: compute if not cached
-                    heatmap = np.load(heatmap_path)
-                    sorted_pixel_indices = sort_pixels(heatmap)
-                    logging.warning(f"Sorted indices not found for {heatmap_path.name}")
-                
+
+                # if sorted_path.exists():
+                sorted_pixel_indices = np.load(heatmap_path)
+                # else:
+                #     # Fallback: compute if not cached
+                #     heatmap = np.load(heatmap_path)
+                #     sorted_pixel_indices = sort_pixels(heatmap)
+                #     logging.warning(f"Sorted indices not found for {heatmap_path.name}")
+                #
                 batch_data.append({
                     'gen_model': gen_model,
                     'method': method,
@@ -358,7 +367,7 @@ class ExperimentRunner:
         show_inner = len(self.config.OCCLUSION_LEVELS) > 10
         for p_level in tqdm(self.config.OCCLUSION_LEVELS, 
                            desc=f"  → {judge_name[:8]}/{strategy[:6]}", 
-                           leave=False, position=2, disable=not show_inner):
+                           leave=False, disable=not show_inner):
             # Process batch of images together
             batch_images = []
             batch_labels = []
@@ -443,7 +452,7 @@ class ExperimentRunner:
             
             return predictions
         except Exception as e:
-            logging.warning(f"Batch evaluation error: {e}, falling back to single")
+            # logging.warning(f"Batch evaluation error: {e}, falling back to single") # TODO: FIXXXXXXXXXX!
             # Fallback to single evaluation
             predictions = []
             for img in batch_images:

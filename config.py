@@ -9,6 +9,7 @@ and XAI methods without altering the core logic.
 # The code crush some time - why? I don't know!! butttt this line make the code works so its make me happy - so pls even if you are very curious what will happen if you will delete this line - get over this, thx ;)
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # Some time there is some warns - again, why? I don't know!! but I don't like them so that's line of code make them gone
 import  warnings
@@ -61,8 +62,8 @@ DATASET_CONFIG = {
 GENERATING_MODELS = [
     "resnet50",
     "mobilenet_v2", 
-    # "vgg16",
-    "vit_b_16",
+    "vgg16",
+    # "vit_b_16",
     # "swin_t",
 ]
 

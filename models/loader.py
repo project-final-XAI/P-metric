@@ -5,11 +5,9 @@ Handles loading pretrained models from torchvision and timm.
 """
 
 import timm
-import torch
 import torch.nn as nn
 import torchvision.models as models
 from config import DEVICE
-import logging
 
 
 def load_model(model_name: str) -> nn.Module:

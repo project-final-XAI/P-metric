@@ -21,8 +21,8 @@ class OcclusionMethod(AttributionMethod):
     def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute Occlusion attribution."""
         occlusion = Occlusion(model)
-        sliding_window_shapes = (3, 20, 20)
-        strides = (3, 16, 16)
+        sliding_window_shapes = (3, 25, 25)
+        strides = (3, 20, 20)
         
         attribution = occlusion.attribute(
             images,
@@ -57,7 +57,7 @@ class XRAIMethod(AttributionMethod):
             images,
             baselines=baseline,
             target=targets,
-            n_steps=50
+            n_steps=25
         )
         
         # Take absolute values and aggregate across channels
