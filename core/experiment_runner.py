@@ -90,7 +90,7 @@ class ExperimentRunner:
             )
         
         logging.info(f"Starting Phase 1 - Dataset: {dataset_name}")
-        logging.info(f"Models: {len(self.config.GENERATING_MODELS)} | Methods: {len(self.config.ATTRIBUTION_METHODS)} | Storage: {'Full+Sorted' if self.config.SAVE_HEATMAPS else 'Sorted only'}")
+        logging.info(f"Models: {len(self.config.GENERATING_MODELS)} | Methods: {len(self.config.ATTRIBUTION_METHODS)} | Storage: Sorted only")
         
         try:
             # Ensure dataset heatmap directory exists
@@ -146,14 +146,8 @@ class ExperimentRunner:
                 dataset_name, model_name, method_name, img_id, sorted=True
             )
             
-            # Check what files are required based on config
-            files_missing = not sorted_path.exists()  # sorted indices always required
-            
-            if self.config.SAVE_HEATMAPS:
-                heatmap_path = self.file_manager.get_heatmap_path(
-                    dataset_name, model_name, method_name, img_id, sorted=False
-                )
-                files_missing = files_missing or not heatmap_path.exists()
+            # Check if sorted indices file exists
+            files_missing = not sorted_path.exists()
             
             # Process if any required file is missing
             if files_missing:
@@ -186,14 +180,7 @@ class ExperimentRunner:
                     img_id = image_ids[i + j]
                     heatmap_np = heatmap.cpu().numpy()
                     
-                    # Save full heatmap only if requested (saves ~50% disk space if False)
-                    if self.config.SAVE_HEATMAPS:
-                        heatmap_path = self.file_manager.get_heatmap_path(
-                            dataset_name, model_name, method_name, img_id, sorted=False
-                        )
-                        np.save(heatmap_path, heatmap_np)
-                    
-                    # Cache sorted pixel indices
+                    # Save sorted pixel indices
                     sorted_indices = sort_pixels(heatmap_np)
                     sorted_path = self.file_manager.get_heatmap_path(
                         dataset_name, model_name, method_name, img_id, sorted=True
@@ -217,7 +204,12 @@ class ExperimentRunner:
         
         try:
             # Initialize progress tracker for fast resume
-            with ProgressTracker(self.file_manager, dataset_name) as progress:
+            with ProgressTracker(
+                self.file_manager, 
+                dataset_name,
+                auto_save_interval=self.config.PROGRESS_AUTO_SAVE_INTERVAL,
+                auto_save_time=self.config.PROGRESS_AUTO_SAVE_TIME
+            ) as progress:
                 completed_count = progress.get_completed_count()
                 if completed_count > 0:
                     completed_str = f" | Resuming: {completed_count:,} done"
@@ -434,25 +426,21 @@ class ExperimentRunner:
     ) -> np.ndarray:
         """Evaluate a batch of images with the judging model."""
         try:
-            batch_tensor = torch.stack(batch_images).to(self.config.DEVICE)
-            
-            with torch.no_grad():
-                # Use FP16 for faster inference
-                if self.config.DEVICE == "cuda":
-                    with torch.amp.autocast(self.config.DEVICE):
-                        outputs = judge_model(batch_tensor)
-                else:
-                    outputs = judge_model(batch_tensor)
+            # Limit batch size to prevent OOM
+            MAX_BATCH_SIZE = 32  # Conservative batch size for GPU memory
+            if len(batch_images) > MAX_BATCH_SIZE:
+                # Process in smaller chunks
+                all_predictions = []
+                for i in range(0, len(batch_images), MAX_BATCH_SIZE):
+                    chunk = batch_images[i:i + MAX_BATCH_SIZE]
+                    chunk_predictions = self._evaluate_batch_chunk(chunk, judge_model)
+                    all_predictions.extend(chunk_predictions)
+                return np.array(all_predictions)
+            else:
+                return self._evaluate_batch_chunk(batch_images, judge_model)
                 
-                if isinstance(outputs, tuple):
-                    outputs = outputs[0]
-                if isinstance(outputs, dict):
-                    outputs = outputs['logits']
-                predictions = torch.argmax(outputs, dim=1).cpu().numpy()
-            
-            return predictions
         except Exception as e:
-            # logging.warning(f"Batch evaluation error: {e}, falling back to single") # TODO: FIXXXXXXXXXX!
+            logging.warning(f"Batch evaluation error: {e}, falling back to single")
             # Fallback to single evaluation
             predictions = []
             for img in batch_images:
@@ -475,6 +463,31 @@ class ExperimentRunner:
                     logging.warning(f"Single evaluation failed: {e2}")
                     predictions.append(None)  # Invalid prediction marker
             return np.array(predictions, dtype=object)
+    
+    def _evaluate_batch_chunk(
+        self, batch_images: List[torch.Tensor], judge_model
+    ) -> np.ndarray:
+        """Evaluate a chunk of images (actual batch processing)."""
+        try:
+            batch_tensor = torch.stack(batch_images).to(self.config.DEVICE)
+            
+            with torch.no_grad():
+                # Use FP16 for faster inference
+                if self.config.DEVICE == "cuda":
+                    with torch.amp.autocast(self.config.DEVICE):
+                        outputs = judge_model(batch_tensor)
+                else:
+                    outputs = judge_model(batch_tensor)
+                
+                if isinstance(outputs, tuple):
+                    outputs = outputs[0]
+                if isinstance(outputs, dict):
+                    outputs = outputs['logits']
+                predictions = torch.argmax(outputs, dim=1).cpu().numpy()
+            
+            return predictions
+        except Exception as e:
+            raise e
     
     def _save_strategy_results(
         self, results_by_level: Dict, dataset_name: str,

@@ -26,10 +26,10 @@ def show_heatmap_with_images(dataset_name='imagenet', num_samples=5):
         print(f"Image directory not found: {images_root}")
         return
 
-    # Get all heatmap files (non-sorted)
+    # Get all sorted heatmap files
     heatmap_files = [
         f for f in os.listdir(heatmaps_path)
-        if f.endswith(".npy") and not f.endswith("_sorted.npy")
+        if f.endswith("_sorted.npy")
     ]
     
     if not heatmap_files:
@@ -75,9 +75,21 @@ def show_heatmap_with_images(dataset_name='imagenet', num_samples=5):
 
             image_path = os.path.join(folder_path, image_files[0])
             
-            # Load the image and heatmap
+            # Load the image and sorted indices
             img = Image.open(image_path).convert("RGB")
-            heatmap = np.load(heatmaps_path / heatmap_file)
+            sorted_indices = np.load(heatmaps_path / heatmap_file)
+            
+            # Convert sorted indices back to a heatmap for visualization
+            # Create a dummy heatmap with the same shape as the image
+            img_array = np.array(img)
+            heatmap_shape = (img_array.shape[0], img_array.shape[1])
+            heatmap = np.zeros(heatmap_shape)
+            
+            # Fill the heatmap based on sorted indices (higher values for more important pixels)
+            for i, idx in enumerate(sorted_indices):
+                if i < len(sorted_indices):
+                    row, col = np.unravel_index(idx, heatmap_shape)
+                    heatmap[row, col] = len(sorted_indices) - i  # Higher values for more important pixels
 
             # Show side-by-side
             fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -87,7 +99,7 @@ def show_heatmap_with_images(dataset_name='imagenet', num_samples=5):
             axes[0].axis("off")
 
             axes[1].imshow(heatmap, cmap='hot', interpolation='nearest')
-            axes[1].set_title(f"Heatmap\n{heatmap_file}")
+            axes[1].set_title(f"Reconstructed Heatmap\n{heatmap_file}")
             axes[1].axis("off")
 
             plt.suptitle(f"Dataset: {dataset_name}", fontsize=14, fontweight='bold')

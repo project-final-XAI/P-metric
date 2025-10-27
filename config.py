@@ -35,12 +35,13 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 HEATMAP_BATCH_SIZE = 4
 
 # -----------------
-# Storage Optimization
+# Progress Tracking Configuration
 # -----------------
-# Save full heatmaps (True) or only sorted indices (False)
-# Setting to False saves ~50% disk space (~4GB for 22K heatmaps)
-# but you won't be able to visualize heatmaps or do further analysis
-SAVE_HEATMAPS = False
+# Auto-save progress every N completed items (0 to disable)
+PROGRESS_AUTO_SAVE_INTERVAL = 100
+# Auto-save progress every N seconds (0 to disable)
+PROGRESS_AUTO_SAVE_TIME = 300  # 5 minutes
+
 
 # -----------------
 # Dataset Configuration

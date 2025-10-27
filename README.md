@@ -138,7 +138,6 @@ FILL_STRATEGIES = ["gray", "blur", "random_noise"]
 results/
 ├── heatmaps/                      # Phase 1: Attribution maps
 │   ├── imagenet/                  # 🆕 Per-dataset organization
-│   │   ├── resnet50-saliency-image_00000.npy
 │   │   └── resnet50-saliency-image_00000_sorted.npy
 │   └── SIPaKMeD/
 │       └── ...
