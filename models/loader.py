@@ -34,7 +34,7 @@ def load_model(model_name: str) -> nn.Module:
 
         if os.path.exists(local_model_path):
             try:
-                checkpoint = torch.load(local_model_path, map_location=DEVICE)
+                checkpoint = torch.load(local_model_path, map_location=DEVICE, weights_only=False)
                 model = checkpoint['model']
                 # logging.info(f"Loaded {model_name} from local file")
             except Exception as e1:

@@ -1,0 +1,6 @@
+dataset,generating_model,attribution_method,judging_model,fill_strategy,auc,drop_at_75
+SIPaKMeD,sipakmed_resnet50.pth,guided_backprop,sipakmed_efficientnetB0.pth,gray,0.5238520408163265,0.5408163265306123
+SIPaKMeD,sipakmed_resnet50.pth,inputxgradient,sipakmed_efficientnetB0.pth,gray,0.4442602040816326,0.6581632653061225
+SIPaKMeD,sipakmed_resnet50.pth,integrated_gradients,sipakmed_efficientnetB0.pth,gray,0.4354591836734694,0.6479591836734694
+SIPaKMeD,sipakmed_resnet50.pth,saliency,sipakmed_efficientnetB0.pth,gray,0.4642857142857143,0.6479591836734694
+SIPaKMeD,sipakmed_resnet50.pth,smoothgrad,sipakmed_efficientnetB0.pth,gray,0.604719387755102,0.44897959183673475

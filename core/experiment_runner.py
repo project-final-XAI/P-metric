@@ -140,7 +140,7 @@ class ExperimentRunner:
         image_ids = []
         labels = []
         
-        for img_id, (img, label) in image_label_map.items()[:100]:
+        for img_id, (img, label) in list(image_label_map.items()):
             # Use FileManager to get paths with dataset
             sorted_path = self.file_manager.get_heatmap_path(
                 dataset_name, model_name, method_name, img_id, sorted=True
@@ -247,7 +247,7 @@ class ExperimentRunner:
                 with tqdm(total=len(heatmap_groups), desc="Phase 2 Progress", unit="group", leave=True) as pbar:
                     for i, (group_key, group_files) in enumerate(heatmap_groups.items(), 1):
                         gen_model, method = group_key
-                        pbar.set_description(f"Phase 2 [{i}/{len(heatmap_groups)}] {gen_model[:10]}/{method[:12]}")
+                        pbar.set_description(f"Phase 2 [{i}/{len(heatmap_groups)}] {gen_model[:20]}/{method[:20]}")
                         try:
                             self._evaluate_heatmap_batch(
                                 group_files, image_label_map, judging_models,

@@ -61,20 +61,20 @@ DATASET_CONFIG = {
 # Model Configuration
 # -----------------
 GENERATING_MODELS = [
-    "resnet50",
-    "mobilenet_v2",
-    "vgg16",
+    # "resnet50",
+    # "mobilenet_v2",
+    # "vgg16",
     # "vit_b_16",
     # "swin_t",
-    # "sipakmed_ResNet50_pytorch.pth"
+    "sipakmed_resnet50.pth"
 ]
 
 JUDGING_MODELS = [
-    "resnet50",
+    # "resnet50",
     # "vit_b_16",
-    "mobilenet_v2",
-    "swin_t",
-    # "sipakmed_efficientnet_pytorch.pth"
+    # "mobilenet_v2",
+    # "swin_t",
+    "sipakmed_efficientnetB0.pth"
 ]
 
 # -----------------
@@ -101,9 +101,9 @@ OCCLUSION_LEVELS = list(range(5, 100, 5))
 
 FILL_STRATEGIES = [
     "gray",
-    "blur",
-    "random_noise",
-    "black",
+    # "blur",
+    # "random_noise",
+    # "black",
     # "mean",
     # "white",
 ]

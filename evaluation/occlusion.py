@@ -38,10 +38,19 @@ def _fill_random_noise(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return occluded_image
 
 
-def _fill_solid_color(image: torch.Tensor, mask: torch.Tensor, color: float) -> torch.Tensor:
-    """Fill masked area with solid color."""
+def _fill_solid_color(image: torch.Tensor, mask: torch.Tensor, color) -> torch.Tensor:
+    """Fill masked area with solid color (can be single value or per-channel tuple)."""
     occluded_image = image.clone()
-    occluded_image[:, mask] = color
+    
+    # Handle per-channel colors (for normalized images)
+    if isinstance(color, (tuple, list)):
+        # color is (R, G, B) values for each channel
+        for c in range(3):
+            occluded_image[c, mask] = color[c]
+    else:
+        # Single value for all channels
+        occluded_image[:, mask] = color
+    
     return occluded_image
 
 
@@ -52,11 +61,18 @@ def _fill_mean_color(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return occluded_image
 
 
+# ImageNet normalization values: mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225]
+# Properly normalized colors for black/white (to show correctly after denormalization):
+# Black (0,0,0): (0 - mean) / std
+NORMALIZED_BLACK = (-2.118, -2.036, -1.804)
+# White (1,1,1): (1 - mean) / std  
+NORMALIZED_WHITE = (2.249, 2.429, 2.640)
+
 # Fill Strategy Registry
 FILL_STRATEGY_REGISTRY: Dict[str, Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = {
     "gray": partial(_fill_solid_color, color=0.5),
-    "black": partial(_fill_solid_color, color=0.0),
-    "white": partial(_fill_solid_color, color=1.0),
+    "black": partial(_fill_solid_color, color=NORMALIZED_BLACK),
+    "white": partial(_fill_solid_color, color=NORMALIZED_WHITE),
     "blur": _fill_blur,
     "random_noise": _fill_random_noise,
     "mean": _fill_mean_color,

@@ -36,15 +36,15 @@ def plot_accuracy_degradation_curves(
 
         # Add boundary points (0%, 1) and (100%, 0) for each method
         extended_group_df = group_df.copy()
-        for hue_value in group_df[hue_col].unique():
-            extended_group_df = pd.concat([
-                extended_group_df,
-                pd.DataFrame({
-                    x_col: [0, 100],
-                    y_col: [1, 0],
-                    hue_col: [hue_value, hue_value]
-                })
-            ])
+        # for hue_value in group_df[hue_col].unique():
+        #     extended_group_df = pd.concat([
+        #         extended_group_df,
+        #         pd.DataFrame({
+        #             x_col: [0, 100],
+        #             y_col: [1, 0],
+        #             hue_col: [hue_value, hue_value]
+        #         })
+        #     ])
 
         plt.figure(figsize=(12, 8))
         sns.set_theme(style="whitegrid")
