@@ -8,3 +8,4 @@
 venv
 .idea
 results/heatmaps
+results/*.progress.json
