@@ -13,7 +13,7 @@ import config
 
 def main():
     parser = argparse.ArgumentParser(description="Run Full CROSS-XAI Experiment")
-    parser.add_argument('--dataset', default='SIPaKMeD', help='Dataset name')
+    parser.add_argument('--dataset', default='imagenet', help='Dataset name')
     args = parser.parse_args()
 
     logging.info("CROSS-XAI FULL EXPERIMENT")
