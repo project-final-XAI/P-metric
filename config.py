@@ -62,10 +62,11 @@ DATASET_CONFIG = {
 # -----------------
 GENERATING_MODELS = [
     "resnet50",
-    "mobilenet_v2", 
+    "mobilenet_v2",
     "vgg16",
     # "vit_b_16",
     # "swin_t",
+    # "sipakmed_ResNet50_pytorch.pth"
 ]
 
 JUDGING_MODELS = [
@@ -73,6 +74,7 @@ JUDGING_MODELS = [
     # "vit_b_16",
     "mobilenet_v2",
     "swin_t",
+    # "sipakmed_efficientnet_pytorch.pth"
 ]
 
 # -----------------

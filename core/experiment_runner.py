@@ -140,7 +140,7 @@ class ExperimentRunner:
         image_ids = []
         labels = []
         
-        for img_id, (img, label) in image_label_map.items():
+        for img_id, (img, label) in image_label_map.items()[:100]:
             # Use FileManager to get paths with dataset
             sorted_path = self.file_manager.get_heatmap_path(
                 dataset_name, model_name, method_name, img_id, sorted=True
