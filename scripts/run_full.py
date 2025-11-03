@@ -1,8 +1,5 @@
 """
 Run Full Experiment: All 3 Phases.
-
-Usage:
-    python scripts/run_full.py --dataset imagenet
 """
 
 import argparse
