@@ -28,12 +28,15 @@ from config import DEVICE, ATTRIBUTION_METHODS
 
 # Path to your image (can be absolute or relative)
 IMAGE_PATH = "../data/imagenet/n01491361/n01491361_tiger_shark.JPEG"
+# IMAGE_PATH = "../data/SIPaKMeD/Dyskeratotic/002.jpeg"
 
 # Model to use for analysis
-MODEL_NAME = "mobilenet_v2" # "sipakmed_resnet50.pth"
+MODEL_NAME = "mobilenet_v2"
+# MODEL_NAME = "sipakmed_resnet50.pth"
 
 # Dataset name for proper class mapping
 DATASET_NAME = "imagenet" # "SIPaKMeD"
+# DATASET_NAME = "SIPaKMeD"
 
 # Occlusion fill strategy
 FILL_STRATEGY = "black"  # Options: "gray", "blur", "black", "white", "random_noise", "mean"
@@ -374,8 +377,16 @@ def visualize_all_methods(
     # Save figure to results directory
     results_dir = Path("../results")
     results_dir.mkdir(exist_ok=True)
-    output_path = results_dir / "xai_visualization.png"
-    
+
+    # Extract clean filename (without extension)
+    if image_path:
+        base_name = Path(image_path).stem  # e.g., "002" from "002.jpeg"
+    else:
+        base_name = "unknown_image"
+
+    # Create unique output file name
+    output_path = results_dir / f"{base_name}_xai_visualization.png"
+
     try:
         fig.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
         print(f"  ✓ Visualization saved to: {output_path}")
