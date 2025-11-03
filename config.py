@@ -57,6 +57,8 @@ DATASET_CONFIG = {
     }
 }
 
+DATASET_NAME = "SIPaKMeD"
+
 # -----------------
 # Model Configuration
 # -----------------

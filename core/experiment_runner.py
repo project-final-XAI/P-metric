@@ -79,8 +79,10 @@ class ExperimentRunner:
             self._model_cache[model_name] = load_model(model_name)
         return self._model_cache[model_name]
 
-    def run_phase_1(self, dataset_name: str):
+    def run_phase_1(self):
         """Generate heatmaps for all model-method-image combinations."""
+
+        dataset_name = self.config.DATASET_NAME
         # Validate dataset name
         if dataset_name not in self.config.DATASET_CONFIG:
             raise ValueError(
@@ -192,8 +194,11 @@ class ExperimentRunner:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    def run_phase_2(self, dataset_name: str):
+    def run_phase_2(self):
         """Evaluate heatmaps with occlusion."""
+
+        dataset_name = self.config.DATASET_NAME
+
         # Validate dataset name
         if dataset_name not in self.config.DATASET_CONFIG:
             raise ValueError(
@@ -503,31 +508,24 @@ class ExperimentRunner:
             result_file, all_results, header=header, append=result_file.exists()
         )
 
-    def run_phase_3(self, dataset_name: str = None):
+    def run_phase_3(self):
         """
         Run analysis and visualization.
-        
-        Args:
-            dataset_name: If specified, analyze only this dataset.
-                         If None, analyze all datasets.
         """
+
         try:
             import pandas as pd
 
-            # Determine which datasets to analyze
-            if dataset_name:
-                datasets = [dataset_name]
-            else:
-                # Check if results directory exists
-                if not self.file_manager.results_dir.exists():
-                    logging.error(f"Results directory does not exist: {self.file_manager.results_dir}")
-                    return
+            # Check if results directory exists
+            if not self.file_manager.results_dir.exists():
+                logging.error(f"Results directory does not exist: {self.file_manager.results_dir}")
+                return
 
-                # Find all datasets with results
-                datasets = [
-                    d.name for d in self.file_manager.results_dir.iterdir()
-                    if d.is_dir() and not d.name.startswith('.')
-                ]
+            # Find all datasets with results
+            datasets = [
+                d.name for d in self.file_manager.results_dir.iterdir()
+                if d.is_dir() and not d.name.startswith('.')
+            ]
 
             if not datasets:
                 logging.error("No result datasets found")
