@@ -16,7 +16,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run Phase 3: Analysis and Visualization")
     parser.add_argument(
         '--dataset',
-        default=None,
+        default="imagenet",
         help='Dataset name (if not specified, analyzes all datasets)'
     )
     args = parser.parse_args()
