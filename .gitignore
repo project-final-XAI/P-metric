@@ -8,8 +8,4 @@
 venv
 .idea
 results/heatmaps
-/results/evaluation/imagenet/.progress.json
-/results/evaluation/imagenet/.progress.tmp
-
-/results/evaluation/SIPaKMeD/.progress.json
-/results/evaluation/SIPaKMeD/.progress.tmp
+/results/evaluation
