@@ -94,6 +94,7 @@ ATTRIBUTION_METHODS = [
     "grad_cam",
     "guided_gradcam",
     "random_baseline",
+    "c3f",
 ]
 
 # -----------------

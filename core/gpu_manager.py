@@ -42,7 +42,8 @@ class GPUManager:
             "xrai": 1,
             "grad_cam": 8,
             "guided_gradcam": 8,
-            "random_baseline": 32
+            "random_baseline": 32,
+            "c3f": 1,
         }
         
         # Adjust based on GPU memory
@@ -61,7 +62,7 @@ class GPUManager:
         """Get processing strategy for method."""
         if method in ["integrated_gradients", "gradientshap"]:
             return "micro"
-        elif method == "xrai":
+        elif method in ["xrai", "c3f"]:
             return "single"
         else:
             return "batch"

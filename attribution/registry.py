@@ -10,6 +10,7 @@ from attribution.integration_based import IntegratedGradientsMethod, GradientSHA
 from attribution.cam_based import GradCAMMethod, GuidedGradCAMMethod
 from attribution.perturbation_based import OcclusionMethod, XRAIMethod
 from attribution.other import GuidedBackpropMethod, RandomBaselineMethod
+from attribution.c3f import C3FMethod
 
 
 # Registry of all available methods
@@ -25,6 +26,7 @@ METHOD_REGISTRY = {
     "grad_cam": GradCAMMethod(),
     "guided_gradcam": GuidedGradCAMMethod(),
     "random_baseline": RandomBaselineMethod(),
+    "c3f": C3FMethod(),
 }
 
 
