@@ -190,9 +190,8 @@ class ExperimentRunner:
                     )
                     np.save(sorted_path, sorted_indices)
 
-        # Clear GPU cache
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # Clear GPU cache after processing batch
+        self.gpu_manager.clear_cache_if_needed(threshold_percent=70.0)
 
     def run_phase_2(self):
         """Evaluate heatmaps with occlusion."""
@@ -232,6 +231,15 @@ class ExperimentRunner:
                 judging_models = {
                     name: self._get_cached_model(name) for name in self.config.JUDGING_MODELS
                 }
+                
+                # Convert judging models to FP16 for faster inference if enabled
+                if self.config.USE_FP16_INFERENCE and self.config.DEVICE == "cuda" and self.gpu_manager.supports_fp16():
+                    for name, model in judging_models.items():
+                        try:
+                            judging_models[name] = model.half()
+                            logging.debug(f"Converted {name} to FP16 for Phase 2 inference")
+                        except Exception as e:
+                            logging.warning(f"Failed to convert {name} to FP16, using FP32: {e}")
 
                 # Get heatmap files for this dataset
                 heatmap_dir = self.file_manager.get_heatmap_dir(dataset_name)
@@ -294,10 +302,13 @@ class ExperimentRunner:
         if not batch_data:
             return
 
-        # Evaluate for each judge and strategy
+                # Evaluate for each judge and strategy
         for judge_name, judge_model in judging_models.items():
             if judge_name == gen_model:
                 continue
+            
+            # Clear cache before starting new judge model
+            self.gpu_manager.clear_cache_if_needed(threshold_percent=70.0)
 
             for strategy in self.config.FILL_STRATEGIES:
                 # Evaluate this specific combination
@@ -379,6 +390,11 @@ class ExperimentRunner:
                         occlusion_level=p_level,
                         strategy=strategy
                     )
+                    
+                    # Convert to FP16 if enabled for consistency with model
+                    if self.config.USE_FP16_INFERENCE and self.config.DEVICE == "cuda" and self.gpu_manager.supports_fp16():
+                        masked_image = masked_image.half()
+                    
                     batch_images.append(masked_image)
                     batch_labels.append(data['label'])
                     batch_info.append(data)
@@ -424,8 +440,16 @@ class ExperimentRunner:
     ) -> np.ndarray:
         """Evaluate a batch of images with the judging model."""
         try:
-            # Limit batch size to prevent OOM
-            MAX_BATCH_SIZE = 32  # Conservative batch size for GPU memory
+            # Check memory and get safe batch size
+            self.gpu_manager.clear_cache_if_needed(threshold_percent=80.0)
+            
+            # Use GPU manager to get optimal batch size 
+            MAX_BATCH_SIZE = self.gpu_manager.get_optimal_inference_batch_size()
+            
+            # Adjust batch size based on current memory usage
+            _, current_usage = self.gpu_manager.get_memory_usage()
+            MAX_BATCH_SIZE = self.gpu_manager.get_safe_batch_size(MAX_BATCH_SIZE, current_usage)
+            
             if len(batch_images) > MAX_BATCH_SIZE:
                 # Process in smaller chunks
                 all_predictions = []
@@ -433,6 +457,11 @@ class ExperimentRunner:
                     chunk = batch_images[i:i + MAX_BATCH_SIZE]
                     chunk_predictions = self._evaluate_batch_chunk(chunk, judge_model)
                     all_predictions.extend(chunk_predictions)
+                    
+                    # Periodic cache clearing for long batches
+                    if i > 0 and i % (MAX_BATCH_SIZE * 4) == 0:
+                        self.gpu_manager.clear_cache_if_needed(threshold_percent=75.0)
+                
                 return np.array(all_predictions)
             else:
                 return self._evaluate_batch_chunk(batch_images, judge_model)
@@ -444,9 +473,9 @@ class ExperimentRunner:
             for img in batch_images:
                 try:
                     single_tensor = img.unsqueeze(0).to(self.config.DEVICE)
-                    with torch.no_grad():
+                    with torch.inference_mode():  # Faster than no_grad
                         if self.config.DEVICE == "cuda":
-                            with torch.amp.autocast(self.config.DEVICE):
+                            with torch.amp.autocast(self.config.DEVICE, dtype=torch.float16):
                                 outputs = judge_model(single_tensor)
                         else:
                             outputs = judge_model(single_tensor)
@@ -469,9 +498,14 @@ class ExperimentRunner:
         try:
             batch_tensor = torch.stack(batch_images).to(self.config.DEVICE)
 
-            with torch.no_grad():
-                # Use FP16 for faster inference
-                if self.config.DEVICE == "cuda":
+            # Use inference_mode for better performance than no_grad
+            with torch.inference_mode():
+                # Use FP16 for faster inference if enabled
+                if self.config.DEVICE == "cuda" and self.config.USE_FP16_INFERENCE:
+                    with torch.amp.autocast(self.config.DEVICE, dtype=torch.float16):
+                        outputs = judge_model(batch_tensor)
+                elif self.config.DEVICE == "cuda":
+                    # Still use autocast but with default precision
                     with torch.amp.autocast(self.config.DEVICE):
                         outputs = judge_model(batch_tensor)
                 else:
@@ -482,8 +516,35 @@ class ExperimentRunner:
                 if isinstance(outputs, dict):
                     outputs = outputs['logits']
                 predictions = torch.argmax(outputs, dim=1).cpu().numpy()
+            
+            # Clean up batch tensor immediately
+            del batch_tensor
 
             return predictions
+        except RuntimeError as e:
+            # Handle CUDA out of memory errors
+            if "out of memory" in str(e).lower():
+                logging.error(f"CUDA OOM error with batch size {len(batch_images)}")
+                logging.error(f"Clearing cache and retrying with smaller batches...")
+                
+                # Emergency cache clear
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                
+                # Retry with smaller batch size (divide by 2)
+                if len(batch_images) > 1:
+                    mid = len(batch_images) // 2
+                    logging.info(f"Splitting batch into {mid} + {len(batch_images) - mid}")
+                    pred1 = self._evaluate_batch_chunk(batch_images[:mid], judge_model)
+                    pred2 = self._evaluate_batch_chunk(batch_images[mid:], judge_model)
+                    return np.concatenate([pred1, pred2])
+                else:
+                    # Single image failed - this is serious
+                    logging.error("Failed to evaluate even a single image!")
+                    raise e
+            else:
+                raise e
         except Exception as e:
             raise e
 

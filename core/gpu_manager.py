@@ -47,10 +47,12 @@ class GPUManager:
         }
         
         # Adjust based on GPU memory
-        if self.gpu_memory_gb > 16:
+        if self.gpu_memory_gb >= 24:
+            return {k: v * 4 for k, v in base_sizes.items()}
+        elif self.gpu_memory_gb > 16:
             return {k: v * 2 for k, v in base_sizes.items()}
         elif self.gpu_memory_gb > 8:
-            return base_sizes
+            return base_sizes  
         else:
             return {k: max(1, v // 2) for k, v in base_sizes.items()}
             

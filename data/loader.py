@@ -64,15 +64,28 @@ def get_dataloader(dataset_name: str, batch_size: int = 1, shuffle: bool = False
 
     # Auto-adjust workers and pin_memory based on device
     import torch
-    num_workers = 4 if torch.cuda.is_available() else 2
-    pin_memory = torch.cuda.is_available()
+    from config import MAX_WORKERS
+    
+    # Optimized settings for high-performance systems
+    if torch.cuda.is_available():
+        num_workers = MAX_WORKERS  # Use config value (8 for powerful CPUs)
+        pin_memory = True
+        persistent_workers = True if len(image_folder) > 10 else False  # Only for larger datasets
+        prefetch_factor = 4  # Pre-load 4 batches per worker
+    else:
+        num_workers = 2
+        pin_memory = False
+        persistent_workers = False
+        prefetch_factor = 2
 
     dataloader = DataLoader(
         dataset=image_folder,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        pin_memory=pin_memory
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor
     )
 
     return dataloader

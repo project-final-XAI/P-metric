@@ -14,6 +14,25 @@ from config import DEVICE
 
 # Fill Strategy Implementations
 
+# Cache blur transform to avoid repeated creation (performance optimization)
+_BLUR_TRANSFORM_CACHE = None
+# Cache random noise tensor to avoid repeated generation (much faster!)
+_RANDOM_NOISE_CACHE = None
+
+def _get_blur_transform():
+    """Get or create cached blur transform."""
+    global _BLUR_TRANSFORM_CACHE
+    if _BLUR_TRANSFORM_CACHE is None:
+        _BLUR_TRANSFORM_CACHE = transforms.GaussianBlur(kernel_size=21, sigma=10)
+    return _BLUR_TRANSFORM_CACHE
+
+def _get_random_noise(shape, device):
+    """Get or create cached random noise tensor."""
+    global _RANDOM_NOISE_CACHE
+    if _RANDOM_NOISE_CACHE is None or _RANDOM_NOISE_CACHE.shape != shape or _RANDOM_NOISE_CACHE.device != device:
+        _RANDOM_NOISE_CACHE = torch.rand(shape, device=device)
+    return _RANDOM_NOISE_CACHE
+
 def _fill_gray(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """Fill masked area with solid gray color."""
     occluded_image = image.clone()
@@ -24,16 +43,16 @@ def _fill_gray(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 def _fill_blur(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """Fill masked area with blurred version of image."""
     occluded_image = image.clone()
-    blur_transform = transforms.GaussianBlur(kernel_size=21, sigma=10)
+    blur_transform = _get_blur_transform()  # Use cached transform
     blurred_image = blur_transform(image)
     occluded_image[:, mask] = blurred_image[:, mask]
     return occluded_image
 
 
 def _fill_random_noise(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Fill masked area with random noise."""
+    """Fill masked area with cached random noise (faster than generating each time)."""
     occluded_image = image.clone()
-    noise = torch.rand_like(image)
+    noise = _get_random_noise(image.shape, image.device)
     occluded_image[:, mask] = noise[:, mask]
     return occluded_image
 
@@ -124,19 +143,22 @@ def apply_occlusion(
     if num_pixels_to_occlude == 0:
         return image.clone()
 
-
     # Move the image to the same device as the torch (GPU obviously..), by the way - that BUG cost me something like 45 minute so a lot of respect to him
     image = image.to(DEVICE)
 
     # Select least important pixels to occlude
     pixels_to_occlude_flat = sorted_pixel_indices[:num_pixels_to_occlude]
 
-    # Convert flat indices to 2D coordinates
+    # Convert flat indices to 2D coordinates (more efficient with advanced indexing)
     rows, cols = np.unravel_index(pixels_to_occlude_flat, image_shape)
 
-    # Create boolean mask for pixels to be occluded
+    # Pre-allocate mask on GPU and fill efficiently
     mask = torch.zeros(image_shape, dtype=torch.bool, device=DEVICE)
-    mask[rows, cols] = True
+    
+    # Use torch tensors for indexing (faster than numpy indexing)
+    rows_tensor = torch.from_numpy(rows).to(DEVICE)
+    cols_tensor = torch.from_numpy(cols).to(DEVICE)
+    mask[rows_tensor, cols_tensor] = True
 
     # Apply fill strategy
     fill_function = FILL_STRATEGY_REGISTRY[strategy]

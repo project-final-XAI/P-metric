@@ -30,9 +30,22 @@ ANALYSIS_DIR = BASE_DIR / "results" / "analysis"
 # -----------------
 # Hardware Configuration
 # -----------------
-MAX_WORKERS = 4
+MAX_WORKERS = 8  # Increased for better CPU utilization with powerful processor
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-HEATMAP_BATCH_SIZE = 4
+HEATMAP_BATCH_SIZE = 16  # Increased for RTX 5090's large VRAM
+
+# -----------------
+# Performance Optimization
+# -----------------
+# Enable FP16 inference for faster computation (Phase 2 judging models)
+USE_FP16_INFERENCE = True
+
+# Enable torch.compile for model optimization (PyTorch 2.0+)
+USE_TORCH_COMPILE = True
+
+# Set optimal matmul precision for Ampere/Ada GPUs
+if torch.cuda.is_available():
+    torch.set_float32_matmul_precision('high')  # Use TensorFloat-32 for better performance
 
 # -----------------
 # Progress Tracking Configuration
