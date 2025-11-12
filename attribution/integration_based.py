@@ -15,7 +15,7 @@ class IntegratedGradientsMethod(AttributionMethod):
     """Integrated Gradients attribution."""
     
     def __init__(self):
-        super().__init__("integrated_gradients", "micro", 4)
+        super().__init__("integrated_gradients", "micro", 16)
         
     def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute Integrated Gradients attribution."""
@@ -23,8 +23,9 @@ class IntegratedGradientsMethod(AttributionMethod):
         attribution = ig.attribute(
             images, 
             target=targets, 
-            n_steps=10,  
-            baselines=torch.zeros_like(images)
+            n_steps=6,
+            baselines=torch.zeros_like(images),
+            internal_batch_size=32  # Increased for better VRAM utilization
         )
         return self._normalize_attribution(attribution)
 
@@ -33,7 +34,7 @@ class GradientSHAPMethod(AttributionMethod):
     """GradientSHAP attribution."""
     
     def __init__(self):
-        super().__init__("gradientshap", "micro", 2)
+        super().__init__("gradientshap", "micro", 8)
         
     def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute GradientSHAP attribution."""
@@ -43,7 +44,7 @@ class GradientSHAPMethod(AttributionMethod):
             images,
             baselines=baseline,
             target=targets,
-            n_samples=3
+            n_samples=4  # Increased for better VRAM utilization
         )
         return self._normalize_attribution(attribution)
 

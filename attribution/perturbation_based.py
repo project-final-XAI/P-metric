@@ -40,7 +40,7 @@ class XRAIMethod(AttributionMethod):
     """XRAI attribution using Integrated Gradients with segmentation."""
     
     def __init__(self):
-        super().__init__("xrai", "single", 1)
+        super().__init__("xrai", "micro", 4)  # Changed to micro-batch for better VRAM utilization
         
     def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
@@ -65,40 +65,44 @@ class XRAIMethod(AttributionMethod):
         if attribution.ndim == 4:
             attribution = torch.mean(attribution, dim=1)
         
-        # Apply smoothing for region-based effect
+        # Apply smoothing for region-based effect (vectorized for batches)
         attribution = self._smooth_attribution(attribution)
         
-        # Normalize
-        normalized = []
-        for attr in attribution:
-            min_val, max_val = attr.min(), attr.max()
-            if max_val > min_val:
-                normalized.append((attr - min_val) / (max_val - min_val))
-            else:
-                normalized.append(attr)
+        # Normalize (vectorized for batches)
+        min_vals = attribution.view(attribution.shape[0], -1).min(dim=1, keepdim=True)[0]
+        max_vals = attribution.view(attribution.shape[0], -1).max(dim=1, keepdim=True)[0]
+        ranges = max_vals - min_vals
+        ranges = ranges.view(attribution.shape[0], 1, 1)  # Reshape for broadcasting
         
-        return torch.stack(normalized)
+        # Avoid division by zero
+        ranges = torch.where(ranges > 0, ranges, torch.ones_like(ranges))
+        normalized = (attribution - min_vals.view(attribution.shape[0], 1, 1)) / ranges
+        
+        return normalized
     
     def _smooth_attribution(self, attribution: torch.Tensor) -> torch.Tensor:
-        """Apply simple smoothing for region-based effect."""
-        # Simple 3x3 average pooling for smoothing
-        smoothed = []
-        for attr in attribution:
-            # Convert to numpy for easier manipulation
-            attr_np = attr.cpu().detach().numpy()
-            
-            # Apply simple moving average
-            kernel_size = 5
-            pad = kernel_size // 2
-            padded = np.pad(attr_np, pad, mode='edge')
-            
-            result = np.zeros_like(attr_np)
-            for i in range(attr_np.shape[0]):
-                for j in range(attr_np.shape[1]):
-                    result[i, j] = np.mean(
-                        padded[i:i+kernel_size, j:j+kernel_size]
-                    )
-            
-            smoothed.append(torch.from_numpy(result))
+        """Apply simple smoothing for region-based effect (vectorized for batches)."""
+        # Use PyTorch's avg_pool2d for efficient batch processing
+        kernel_size = 5
+        padding = kernel_size // 2
         
-        return torch.stack(smoothed)
+        # Add channel dimension for avg_pool2d (expects [B, C, H, W])
+        if attribution.ndim == 2:
+            attribution = attribution.unsqueeze(0).unsqueeze(0)
+        elif attribution.ndim == 3:
+            attribution = attribution.unsqueeze(1)
+        
+        # Apply average pooling with padding
+        smoothed = torch.nn.functional.avg_pool2d(
+            attribution, 
+            kernel_size=kernel_size, 
+            stride=1, 
+            padding=padding,
+            count_include_pad=False
+        )
+        
+        # Remove channel dimension
+        if smoothed.shape[1] == 1:
+            smoothed = smoothed.squeeze(1)
+        
+        return smoothed

@@ -42,6 +42,16 @@ class ExperimentRunner:
 
     def __init__(self, config):
         self.config = config
+
+        # Normalize deprecated allocator env var to silence warnings
+        try:
+            import os as _os
+            if "PYTORCH_CUDA_ALLOC_CONF" in _os.environ and "PYTORCH_ALLOC_CONF" not in _os.environ:
+                _os.environ["PYTORCH_ALLOC_CONF"] = _os.environ["PYTORCH_CUDA_ALLOC_CONF"]
+                del _os.environ["PYTORCH_CUDA_ALLOC_CONF"]
+        except Exception:
+            pass
+
         self.gpu_manager = GPUManager()
         self.gpu_manager.print_info()
 
@@ -76,8 +86,16 @@ class ExperimentRunner:
         """Load model with caching."""
         if model_name not in self._model_cache:
             # logging.info(f"Loading model: {model_name}")
-            self._model_cache[model_name] = load_model(model_name)
+            model = load_model(model_name)
+            model = self._maybe_compile_model(model, model_name)
+            self._model_cache[model_name] = model
         return self._model_cache[model_name]
+
+    def _maybe_compile_model(self, model: torch.nn.Module, model_name: str) -> torch.nn.Module:
+        """
+        Always use eager mode. torch.compile is disabled in code for maximum compatibility.
+        """
+        return model
 
     def run_phase_1(self):
         """Generate heatmaps for all model-method-image combinations."""
@@ -164,16 +182,28 @@ class ExperimentRunner:
         # Process in batches with inner progress bar
         for i in tqdm(range(0, len(images_to_process), batch_size),
                       desc=f"  → Processing {len(images_to_process)} images", dynamic_ncols=True):
+            # Periodic thermal check every 5 batches
+            if i > 0 and i % (batch_size * 5) == 0:
+                self.gpu_manager.check_and_throttle()
+                # Removed sync_and_clear - let GPU work asynchronously
+
             end_idx = min(i + batch_size, len(images_to_process))
 
             # Concatenate images
-            batch_images = torch.cat(images_to_process[i:end_idx], dim=0).to(self.config.DEVICE)
-            batch_labels = torch.tensor(labels[i:end_idx]).to(self.config.DEVICE)
+            batch_images = torch.cat(images_to_process[i:end_idx], dim=0).to(self.config.DEVICE, non_blocking=True)
+            if batch_images.ndim == 4:
+                try:
+                    batch_images = batch_images.to(memory_format=torch.channels_last)
+                except Exception:
+                    pass
+            batch_labels = torch.tensor(labels[i:end_idx]).to(self.config.DEVICE, non_blocking=True)
 
             # Generate attributions with mixed precision for faster computation
             if self.config.DEVICE == "cuda":
                 with torch.amp.autocast(self.config.DEVICE):
                     heatmaps = method(model, batch_images, batch_labels)
+                    # Removed sync - let GPU pipeline work asynchronously
+                    # Only sync when absolutely necessary (e.g., before CPU operations)
             else:
                 heatmaps = method(model, batch_images, batch_labels)
 
@@ -190,8 +220,10 @@ class ExperimentRunner:
                     )
                     np.save(sorted_path, sorted_indices)
 
-        # Clear GPU cache after processing batch
+        # Clear GPU cache and check temperature after processing batch
+        self.gpu_manager.check_and_throttle()
         self.gpu_manager.clear_cache_if_needed(threshold_percent=70.0)
+        # Removed sync_and_clear - let GPU work asynchronously, only clear cache if needed
 
     def run_phase_2(self):
         """Evaluate heatmaps with occlusion."""
@@ -231,7 +263,7 @@ class ExperimentRunner:
                 judging_models = {
                     name: self._get_cached_model(name) for name in self.config.JUDGING_MODELS
                 }
-                
+
                 # Convert judging models to FP16 for faster inference if enabled
                 if self.config.USE_FP16_INFERENCE and self.config.DEVICE == "cuda" and self.gpu_manager.supports_fp16():
                     for name, model in judging_models.items():
@@ -306,9 +338,12 @@ class ExperimentRunner:
         for judge_name, judge_model in judging_models.items():
             if judge_name == gen_model:
                 continue
-            
-            # Clear cache before starting new judge model
-            self.gpu_manager.clear_cache_if_needed(threshold_percent=70.0)
+
+            # Only clear cache if memory usage is high before starting new judge model
+            _, current_usage = self.gpu_manager.get_memory_usage()
+            if current_usage > 80.0:
+                self.gpu_manager.clear_cache_if_needed(threshold_percent=80.0)
+                self.gpu_manager.sync_and_clear()
 
             for strategy in self.config.FILL_STRATEGIES:
                 # Evaluate this specific combination
@@ -359,6 +394,25 @@ class ExperimentRunner:
             gen_model: str, method: str
     ):
         """Evaluate a specific judge/strategy combination for all images."""
+        from evaluation.occlusion import apply_occlusion_batch
+        from concurrent.futures import ThreadPoolExecutor
+
+        # Pre-allocation: Warm up GPU and prepare reusable buffers
+        # This reduces allocation overhead during processing
+        if self.config.DEVICE == "cuda" and batch_data:
+            try:
+                # Get image shape from first image to pre-allocate common buffers
+                sample_image = batch_data[0]['image'][0]
+                if sample_image.ndim >= 2:
+                    # Pre-allocate a small workspace tensor to warm up GPU memory allocator
+                    # This reduces first-batch allocation overhead
+                    _ = torch.zeros((1, *sample_image.shape), device=self.config.DEVICE, dtype=torch.float16 if self.config.USE_FP16_INFERENCE else torch.float32)
+                    del _
+                    # Trigger a small dummy operation to initialize CUDA context
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass  # If pre-allocation fails, continue normally
+
         # Results grouped by occlusion level
         results_by_level = defaultdict(list)
         total_skipped = 0
@@ -366,66 +420,179 @@ class ExperimentRunner:
 
         # Inner progress bar for occlusion levels (only if many levels)
         show_inner = len(self.config.OCCLUSION_LEVELS) > 10
-        for p_level in tqdm(self.config.OCCLUSION_LEVELS,
-                            desc=f"  → {judge_name[:8]}/{strategy[:6]}",
-                            leave=False, disable=not show_inner):
-            # Process batch of images together
-            batch_images = []
+        occlusion_levels = list(self.config.OCCLUSION_LEVELS)
+
+        # Helper function to prepare occlusion for a level
+        def prepare_occlusion_level(level):
+            """Prepare occlusion data for a specific level."""
+            images_to_process = []
+            sorted_indices_list = []
             batch_labels = []
             batch_info = []
 
             for data in batch_data:
-                # Check if already completed
                 if progress.is_completed(
                         data['gen_model'], data['method'], data['img_id'],
-                        judge_name, strategy, p_level
+                        judge_name, strategy, level
                 ):
-                    total_skipped += 1
                     continue
 
+                images_to_process.append(data['image'][0])
+                sorted_indices_list.append(data['sorted_indices'])
+                batch_labels.append(data['label'])
+                batch_info.append(data)
+
+            if not images_to_process:
+                return None, None, None, None
+
+            return images_to_process, sorted_indices_list, batch_labels, batch_info
+
+        # Aggressive pipelining: prepare data AND occlude multiple levels ahead
+        # This keeps GPU continuously busy - batches are ready when GPU finishes
+        PIPELINE_DEPTH = min(3, len(occlusion_levels))
+        with ThreadPoolExecutor(max_workers=PIPELINE_DEPTH + 2) as executor:
+            # Queue of occluded batches ready for GPU (already processed)
+            occluded_queue = {}  # {level_idx: (masked_images, batch_labels, batch_info)}
+            # Queue of data preparation futures
+            data_queue = []  # [(level_idx, future)]
+            
+            # Helper to occlude a batch
+            def occlude_batch(level, data_tuple):
+                if data_tuple is None or data_tuple[0] is None:
+                    return None
+                images, sorted_indices, labels, info = data_tuple
                 try:
-                    masked_image = apply_occlusion(
-                        image=data['image'][0],
-                        sorted_pixel_indices=data['sorted_indices'],
-                        occlusion_level=p_level,
-                        strategy=strategy
-                    )
-                    
-                    # Convert to FP16 if enabled for consistency with model
-                    if self.config.USE_FP16_INFERENCE and self.config.DEVICE == "cuda" and self.gpu_manager.supports_fp16():
-                        masked_image = masked_image.half()
-                    
-                    batch_images.append(masked_image)
-                    batch_labels.append(data['label'])
-                    batch_info.append(data)
+                    masked = apply_occlusion_batch(images, sorted_indices, level, strategy)
+                    if self.config.DEVICE == "cuda":
+                        for i, img in enumerate(masked):
+                            if img.ndim == 4:
+                                try:
+                                    masked[i] = img.to(memory_format=torch.channels_last, non_blocking=True)
+                                except Exception:
+                                    pass
+                            if self.config.USE_FP16_INFERENCE and self.gpu_manager.supports_fp16():
+                                masked[i] = masked[i].half()
+                    return (masked, labels, info)
                 except Exception as e:
-                    logging.warning(f"Error applying occlusion: {e}")
+                    logging.warning(f"Error occluding level {level}: {e}")
+                    return None
+            
+            # Pre-prepare and pre-occlude first levels
+            for i in range(min(PIPELINE_DEPTH, len(occlusion_levels))):
+                level = occlusion_levels[i]
+                data_future = executor.submit(prepare_occlusion_level, level)
+                data_queue.append((i, data_future))
+
+            from concurrent.futures import Future
+            
+            for idx, p_level in enumerate(tqdm(occlusion_levels,
+                                desc=f"  → {judge_name[:8]}/{strategy[:6]}",
+                                leave=False, disable=not show_inner)):
+                # Check occlusion futures that completed BEFORE trying to use them
+                for occlude_idx in list(occluded_queue.keys()):
+                    item = occluded_queue[occlude_idx]
+                    if isinstance(item, Future):
+                        if item.done():
+                            result = item.result()
+                            if result is not None:
+                                occluded_queue[occlude_idx] = result
+                            else:
+                                del occluded_queue[occlude_idx]
+                
+                # Get occluded batch from queue if ready, otherwise process now
+                if idx in occluded_queue:
+                    item = occluded_queue.pop(idx)
+                    # Check if it's still a Future (shouldn't happen after check above, but safety check)
+                    if isinstance(item, Future):
+                        if item.done():
+                            result = item.result()
+                            if result is None:
+                                # Fallback to synchronous processing
+                                data = prepare_occlusion_level(p_level)
+                                if data[0] is None:
+                                    total_skipped += len(batch_data) if batch_data else 0
+                                    continue
+                                result = occlude_batch(p_level, data)
+                                if result is None:
+                                    continue
+                                masked_images, batch_labels, batch_info = result
+                                del data
+                            else:
+                                masked_images, batch_labels, batch_info = result
+                        else:
+                            # Future not done yet - process synchronously
+                            data = prepare_occlusion_level(p_level)
+                            if data[0] is None:
+                                total_skipped += len(batch_data) if batch_data else 0
+                                continue
+                            result = occlude_batch(p_level, data)
+                            if result is None:
+                                continue
+                            masked_images, batch_labels, batch_info = result
+                            del data
+                    else:
+                        # Already processed result tuple
+                        masked_images, batch_labels, batch_info = item
+                else:
+                    # Process synchronously (fallback)
+                    data = prepare_occlusion_level(p_level)
+                    if data[0] is None:
+                        total_skipped += len(batch_data) if batch_data else 0
+                        continue
+                    result = occlude_batch(p_level, data)
+                    if result is None:
+                        continue
+                    masked_images, batch_labels, batch_info = result
+                    del data
+
+                # Process completed data prep -> start occlusion in background
+                for data_idx, data_future in list(data_queue):
+                    if data_future.done():
+                        data_queue.remove((data_idx, data_future))
+                        if data_idx not in occluded_queue and data_idx > idx:
+                            level = occlusion_levels[data_idx]
+                            occlude_future = executor.submit(occlude_batch, level, data_future.result())
+                            # Store future - will check if done in next iteration
+                            occluded_queue[data_idx] = occlude_future
+
+                # Start preparing next levels to keep pipeline full
+                next_idx = idx + len(data_queue) + len([k for k in occluded_queue.keys() if k > idx]) + 1
+                while len(data_queue) < PIPELINE_DEPTH and next_idx < len(occlusion_levels):
+                    level = occlusion_levels[next_idx]
+                    data_future = executor.submit(prepare_occlusion_level, level)
+                    data_queue.append((next_idx, data_future))
+                    next_idx += 1
+
+                if not masked_images:
                     continue
 
-            if not batch_images:
-                continue
+                # Evaluate batch - GPU processes this while next batches are being prepared/occluded
+                predictions = self._evaluate_batch(masked_images, judge_model)
+                del masked_images
 
-            # Evaluate batch
-            predictions = self._evaluate_batch(batch_images, judge_model)
+                # Record results - batch progress updates to reduce I/O overhead
+                batch_progress_items = []
+                for pred_idx, (pred, info) in enumerate(zip(predictions, batch_info)):
+                    # Skip invalid predictions (failed evaluations)
+                    if pred is None or pred < 0:
+                        logging.error(f"Skipping invalid prediction for {info['img_id']} at level {p_level}")
+                        continue
 
-            # Record results
-            for idx, (pred, info) in enumerate(zip(predictions, batch_info)):
-                # Skip invalid predictions (failed evaluations)
-                if pred is None or pred < 0:
-                    logging.error(f"Skipping invalid prediction for {info['img_id']} at level {p_level}")
-                    continue
+                    is_correct = 1 if pred == batch_labels[pred_idx] else 0
+                    results_by_level[p_level].append([
+                        info['img_id'], p_level, is_correct
+                    ])
 
-                is_correct = 1 if pred == batch_labels[idx] else 0
-                results_by_level[p_level].append([
-                    info['img_id'], p_level, is_correct
-                ])
-
-                # Mark as completed in progress tracker
-                progress.mark_completed(
-                    info['gen_model'], info['method'], info['img_id'],
-                    judge_name, strategy, p_level
-                )
-                total_processed += 1
+                    # Collect progress items for batch update (reduces I/O)
+                    batch_progress_items.append((
+                        info['gen_model'], info['method'], info['img_id'],
+                        judge_name, strategy, p_level
+                    ))
+                    total_processed += 1
+                
+                # Batch update progress tracker (more efficient - single call instead of many)
+                if batch_progress_items:
+                    progress.mark_batch_completed(batch_progress_items)
 
         # Save results to file
         if results_by_level:
@@ -441,27 +608,63 @@ class ExperimentRunner:
         """Evaluate a batch of images with the judging model."""
         try:
             # Check memory and get safe batch size
-            self.gpu_manager.clear_cache_if_needed(threshold_percent=80.0)
-            
-            # Use GPU manager to get optimal batch size 
-            MAX_BATCH_SIZE = self.gpu_manager.get_optimal_inference_batch_size()
-            
-            # Adjust batch size based on current memory usage
+            # Only clear cache if memory usage is actually high (optimization)
             _, current_usage = self.gpu_manager.get_memory_usage()
+            if current_usage >= 80.0:
+                self.gpu_manager.clear_cache_if_needed(threshold_percent=80.0)
+
+            # Use GPU manager to get optimal batch size
+            MAX_BATCH_SIZE = self.gpu_manager.get_optimal_inference_batch_size()
+
+            # Adjust batch size based on current memory usage (already checked above)
             MAX_BATCH_SIZE = self.gpu_manager.get_safe_batch_size(MAX_BATCH_SIZE, current_usage)
-            
+
+            # Check GPU temperature and throttle if needed
+            self.gpu_manager.check_and_throttle()
+            throttle_factor = getattr(self.gpu_manager, '_throttle_factor', 1.0)
+            MAX_BATCH_SIZE = int(MAX_BATCH_SIZE * throttle_factor)
+
+            # Aggressive multipliers for better VRAM utilization when GPU is underutilized
+            # With 0% GPU utilization, we can be very aggressive with batch sizes
+            max_cap = getattr(self.config, "INFERENCE_MAX_BATCH", 2048)  # Significantly increased for high-VRAM GPUs
+            if current_usage < 20.0:
+                # Very low usage - be very aggressive
+                MAX_BATCH_SIZE = min(int(MAX_BATCH_SIZE * 4.0), max_cap)
+            elif current_usage < 35.0:
+                MAX_BATCH_SIZE = min(int(MAX_BATCH_SIZE * 3.0), max_cap)  # Increased for better VRAM usage
+            elif current_usage < 50.0:
+                MAX_BATCH_SIZE = min(int(MAX_BATCH_SIZE * 2.5), max_cap)  # Increased for better VRAM usage
+            elif current_usage < 70.0:
+                MAX_BATCH_SIZE = min(int(MAX_BATCH_SIZE * 2.0), max_cap)  # Moderate increase
+
             if len(batch_images) > MAX_BATCH_SIZE:
-                # Process in smaller chunks
+                # Process in smaller chunks with minimal synchronization
+                # Process chunks continuously to keep GPU busy
                 all_predictions = []
+                num_chunks = (len(batch_images) + MAX_BATCH_SIZE - 1) // MAX_BATCH_SIZE
+                
                 for i in range(0, len(batch_images), MAX_BATCH_SIZE):
                     chunk = batch_images[i:i + MAX_BATCH_SIZE]
+                    # Process chunk - GPU works asynchronously, no sync needed
                     chunk_predictions = self._evaluate_batch_chunk(chunk, judge_model)
                     all_predictions.extend(chunk_predictions)
-                    
-                    # Periodic cache clearing for long batches
-                    if i > 0 and i % (MAX_BATCH_SIZE * 4) == 0:
-                        self.gpu_manager.clear_cache_if_needed(threshold_percent=75.0)
-                
+
+                    # Explicitly delete chunk to free memory immediately
+                    # Don't sync - let GPU continue processing next operations
+                    del chunk
+
+                    # Reduced cache clearing frequency - only every 10 chunks or at end
+                    # This minimizes overhead and keeps GPU utilization high
+                    chunk_idx = i // MAX_BATCH_SIZE
+                    if (chunk_idx > 0 and chunk_idx % 10 == 0) or (chunk_idx == num_chunks - 1):
+                        # Check memory usage before clearing - non-blocking check
+                        _, current_usage = self.gpu_manager.get_memory_usage()
+                        if current_usage > 85.0:  # Only clear if usage is high
+                            self.gpu_manager.clear_cache_if_needed(threshold_percent=85.0)
+                        # Check temperature (non-blocking, uses cached value if recent)
+                        self.gpu_manager.check_and_throttle()
+                        # No sync - GPU continues working asynchronously
+
                 return np.array(all_predictions)
             else:
                 return self._evaluate_batch_chunk(batch_images, judge_model)
@@ -496,7 +699,25 @@ class ExperimentRunner:
     ) -> np.ndarray:
         """Evaluate a chunk of images (actual batch processing)."""
         try:
-            batch_tensor = torch.stack(batch_images).to(self.config.DEVICE)
+            # Use non-blocking transfer for better GPU utilization
+            # Stack on GPU directly if all images are already on GPU, otherwise use non_blocking
+            if self.config.DEVICE == "cuda":
+                # Check if images are already on GPU
+                if all(img.device.type == "cuda" for img in batch_images):
+                    # Stack directly on GPU - faster
+                    batch_tensor = torch.stack(batch_images)
+                else:
+                    # Transfer with non-blocking for better pipelining
+                    batch_tensor = torch.stack(batch_images).to(self.config.DEVICE, non_blocking=True)
+            else:
+                batch_tensor = torch.stack(batch_images).to(self.config.DEVICE)
+
+            if batch_tensor.ndim == 4:
+                try:
+                    # Use non_blocking for memory format conversion to overlap with GPU work
+                    batch_tensor = batch_tensor.to(memory_format=torch.channels_last, non_blocking=True)
+                except Exception:
+                    pass
 
             # Use inference_mode for better performance than no_grad
             with torch.inference_mode():
@@ -515,7 +736,11 @@ class ExperimentRunner:
                     outputs = outputs[0]
                 if isinstance(outputs, dict):
                     outputs = outputs['logits']
-                predictions = torch.argmax(outputs, dim=1).cpu().numpy()
+                # Only sync when we need to transfer results to CPU
+                # Note: cpu() and numpy() will sync, but we delay it until here
+                predictions_tensor = torch.argmax(outputs, dim=1)
+                # Transfer to CPU - sync happens here, but we've done all GPU work first
+                predictions = predictions_tensor.cpu().numpy()
             
             # Clean up batch tensor immediately
             del batch_tensor

@@ -9,3 +9,5 @@ venv
 .idea
 results/heatmaps
 /results/evaluation
+*.pyc
+*/__pycache__/

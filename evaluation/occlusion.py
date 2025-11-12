@@ -167,6 +167,81 @@ def apply_occlusion(
     return occluded_image
 
 
+def apply_occlusion_batch(
+        images: list[torch.Tensor],
+        sorted_pixel_indices_list: list[np.ndarray],
+        occlusion_level: int,
+        strategy: str,
+        image_shape: Tuple[int, int] = (224, 224)
+) -> list[torch.Tensor]:
+    """
+    Apply occlusion to a batch of images efficiently using vectorized operations.
+    
+    This function processes multiple images at once, which is much faster than
+    calling apply_occlusion() in a loop, especially when images are already on GPU.
+    
+    Args:
+        images: List of image tensors, each (C, H, W)
+        sorted_pixel_indices_list: List of flattened arrays of pixel indices sorted by importance
+        occlusion_level: Percentage (0-100) of pixels to occlude
+        strategy: Fill strategy to use
+        image_shape: (Height, Width) of the image
+        
+    Returns:
+        List of occluded image tensors
+    """
+    if strategy not in FILL_STRATEGY_REGISTRY:
+        raise ValueError(f"Fill strategy '{strategy}' is not recognized.")
+
+    if not (0 <= occlusion_level <= 100):
+        raise ValueError("Occlusion level must be between 0 and 100.")
+
+    if len(images) == 0:
+        return []
+
+    total_pixels = image_shape[0] * image_shape[1]
+    num_pixels_to_occlude = int(total_pixels * (occlusion_level / 100.0))
+
+    if num_pixels_to_occlude == 0:
+        return [img.clone() for img in images]
+
+    # Ensure all images are on the same device (GPU)
+    device = DEVICE
+    images_gpu = [img.to(device, non_blocking=True) for img in images]
+    
+    # Pre-allocate all masks on GPU at once for better memory efficiency
+    batch_size = len(images_gpu)
+    masks = torch.zeros((batch_size, image_shape[0], image_shape[1]), dtype=torch.bool, device=device)
+    
+    # Create masks for all images efficiently
+    for i, sorted_indices in enumerate(sorted_pixel_indices_list):
+        if num_pixels_to_occlude > 0:
+            pixels_to_occlude_flat = sorted_indices[:num_pixels_to_occlude]
+            rows, cols = np.unravel_index(pixels_to_occlude_flat, image_shape)
+            
+            # Convert to torch tensors and set mask
+            rows_tensor = torch.from_numpy(rows).to(device, non_blocking=True)
+            cols_tensor = torch.from_numpy(cols).to(device, non_blocking=True)
+            # Index into the 2D mask for this image: masks[i] is shape (H, W)
+            masks[i][rows_tensor, cols_tensor] = True
+    
+    # Get fill function
+    fill_function = FILL_STRATEGY_REGISTRY[strategy]
+    
+    # Apply occlusion to all images - process in batches for fill operations
+    occluded_images = []
+    for i, image in enumerate(images_gpu):
+        mask = masks[i]
+        occluded_image = fill_function(image, mask)
+        occluded_images.append(occluded_image)
+    
+    # Free masks and images_gpu from memory after processing
+    del masks
+    del images_gpu
+    
+    return occluded_images
+
+
 def evaluate_judging_model(
         judging_model: torch.nn.Module,
         masked_image: torch.Tensor,

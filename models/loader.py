@@ -7,7 +7,7 @@ Handles loading pretrained models from torchvision and timm.
 import timm
 import torch.nn as nn
 import torchvision.models as models
-from config import DEVICE, USE_TORCH_COMPILE
+from config import DEVICE
 
 import os
 import torch
@@ -58,6 +58,12 @@ def load_model(model_name: str) -> nn.Module:
     # Move to device (works for both CPU and GPU)
     model = model.to(DEVICE)
 
+    # Prefer channels_last for CNNs to improve TensorCore utilization
+    try:
+        model = model.to(memory_format=torch.channels_last)
+    except Exception:
+        pass
+
     model.eval()
 
     # Keep gradients enabled for attribution methods
@@ -65,15 +71,7 @@ def load_model(model_name: str) -> nn.Module:
     for param in model.parameters():
         param.requires_grad = True
 
-    # Apply torch.compile for optimization (PyTorch 2.0+)
-    if USE_TORCH_COMPILE and DEVICE == "cuda":
-        try:
-            # Use 'reduce-overhead' mode for optimal inference performance
-            # This enables CUDA graphs and other optimizations
-            model = torch.compile(model, mode='reduce-overhead')
-            logging.debug(f"Successfully compiled {model_name} with torch.compile")
-        except Exception as e:
-            # Fallback gracefully if compilation fails
-            logging.warning(f"torch.compile failed for {model_name}, using eager mode: {e}")
+    # Always use eager mode for maximum compatibility
+    logging.debug(f"Using eager mode for {model_name} (torch.compile disabled)")
 
     return model

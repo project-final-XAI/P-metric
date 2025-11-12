@@ -175,8 +175,20 @@ class ProgressTracker:
                 f.flush()
                 os.fsync(f.fileno())
             
-            # Atomic rename (this is atomic on most filesystems)
-            temp_file.replace(self.progress_file)
+            # Atomic-ish rename with Windows-friendly retries
+            # On Windows, replace can fail with Access is denied if the file is scanned/locked briefly.
+            attempts = 5
+            last_err = None
+            for _ in range(attempts):
+                try:
+                    os.replace(str(temp_file), str(self.progress_file))
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    time.sleep(0.1)
+            if last_err:
+                raise last_err
             
             self._dirty = False
             logging.debug(f"Saved progress: {len(self.completed)} items")
