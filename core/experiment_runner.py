@@ -334,7 +334,7 @@ class ExperimentRunner:
         if not batch_data:
             return
 
-                # Evaluate for each judge and strategy
+            # Evaluate for each judge and strategy
         for judge_name, judge_model in judging_models.items():
             if judge_name == gen_model:
                 continue
@@ -406,7 +406,8 @@ class ExperimentRunner:
                 if sample_image.ndim >= 2:
                     # Pre-allocate a small workspace tensor to warm up GPU memory allocator
                     # This reduces first-batch allocation overhead
-                    _ = torch.zeros((1, *sample_image.shape), device=self.config.DEVICE, dtype=torch.float16 if self.config.USE_FP16_INFERENCE else torch.float32)
+                    _ = torch.zeros((1, *sample_image.shape), device=self.config.DEVICE,
+                                    dtype=torch.float16 if self.config.USE_FP16_INFERENCE else torch.float32)
                     del _
                     # Trigger a small dummy operation to initialize CUDA context
                     torch.cuda.empty_cache()
@@ -447,7 +448,7 @@ class ExperimentRunner:
 
             return images_to_process, sorted_indices_list, batch_labels, batch_info
 
-        # Aggressive pipelining: prepare data AND occlude multiple levels ahead
+        # pipelining: prepare data AND occlude multiple levels ahead
         # This keeps GPU continuously busy - batches are ready when GPU finishes
         PIPELINE_DEPTH = min(3, len(occlusion_levels))
         with ThreadPoolExecutor(max_workers=PIPELINE_DEPTH + 2) as executor:
@@ -455,7 +456,7 @@ class ExperimentRunner:
             occluded_queue = {}  # {level_idx: (masked_images, batch_labels, batch_info)}
             # Queue of data preparation futures
             data_queue = []  # [(level_idx, future)]
-            
+
             # Helper to occlude a batch
             def occlude_batch(level, data_tuple):
                 if data_tuple is None or data_tuple[0] is None:
@@ -476,7 +477,7 @@ class ExperimentRunner:
                 except Exception as e:
                     logging.warning(f"Error occluding level {level}: {e}")
                     return None
-            
+
             # Pre-prepare and pre-occlude first levels
             for i in range(min(PIPELINE_DEPTH, len(occlusion_levels))):
                 level = occlusion_levels[i]
@@ -484,10 +485,10 @@ class ExperimentRunner:
                 data_queue.append((i, data_future))
 
             from concurrent.futures import Future
-            
+
             for idx, p_level in enumerate(tqdm(occlusion_levels,
-                                desc=f"  → {judge_name[:8]}/{strategy[:6]}",
-                                leave=False, disable=not show_inner)):
+                                               desc=f"  → {judge_name[:8]}/{strategy[:6]}",
+                                               leave=False, disable=not show_inner)):
                 # Check occlusion futures that completed BEFORE trying to use them
                 for occlude_idx in list(occluded_queue.keys()):
                     item = occluded_queue[occlude_idx]
@@ -498,7 +499,7 @@ class ExperimentRunner:
                                 occluded_queue[occlude_idx] = result
                             else:
                                 del occluded_queue[occlude_idx]
-                
+
                 # Get occluded batch from queue if ready, otherwise process now
                 if idx in occluded_queue:
                     item = occluded_queue.pop(idx)
@@ -520,6 +521,7 @@ class ExperimentRunner:
                             else:
                                 masked_images, batch_labels, batch_info = result
                         else:
+
                             # Future not done yet - process synchronously
                             data = prepare_occlusion_level(p_level)
                             if data[0] is None:
@@ -589,7 +591,7 @@ class ExperimentRunner:
                         judge_name, strategy, p_level
                     ))
                     total_processed += 1
-                
+
                 # Batch update progress tracker (more efficient - single call instead of many)
                 if batch_progress_items:
                     progress.mark_batch_completed(batch_progress_items)
@@ -642,7 +644,7 @@ class ExperimentRunner:
                 # Process chunks continuously to keep GPU busy
                 all_predictions = []
                 num_chunks = (len(batch_images) + MAX_BATCH_SIZE - 1) // MAX_BATCH_SIZE
-                
+
                 for i in range(0, len(batch_images), MAX_BATCH_SIZE):
                     chunk = batch_images[i:i + MAX_BATCH_SIZE]
                     # Process chunk - GPU works asynchronously, no sync needed
@@ -741,7 +743,7 @@ class ExperimentRunner:
                 predictions_tensor = torch.argmax(outputs, dim=1)
                 # Transfer to CPU - sync happens here, but we've done all GPU work first
                 predictions = predictions_tensor.cpu().numpy()
-            
+
             # Clean up batch tensor immediately
             del batch_tensor
 
@@ -751,12 +753,12 @@ class ExperimentRunner:
             if "out of memory" in str(e).lower():
                 logging.error(f"CUDA OOM error with batch size {len(batch_images)}")
                 logging.error(f"Clearing cache and retrying with smaller batches...")
-                
+
                 # Emergency cache clear
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
-                
+
                 # Retry with smaller batch size (divide by 2)
                 if len(batch_images) > 1:
                     mid = len(batch_images) // 2
