@@ -26,6 +26,8 @@ from data.loader import get_dataloader
 from evaluation.occlusion import sort_pixels, apply_occlusion, evaluate_judging_model
 from evaluation.metrics import calculate_auc, calculate_drop
 from visualization.plotter import plot_accuracy_degradation_curves, plot_fill_strategy_comparison
+from evaluation.judging.registry import get_judging_model, register_judging_model, create_llamavision_judge_factory
+from evaluation.judging.base import JudgingModel
 
 # Setup logging (separate from tqdm stdout)
 import sys
@@ -63,8 +65,11 @@ class ExperimentRunner:
         self.file_manager.ensure_dir_exists(self.file_manager.results_dir)
         self.file_manager.ensure_dir_exists(self.file_manager.analysis_dir)
 
-        # Model cache to avoid reloading
-        self._model_cache: Dict[str, torch.nn.Module] = {}
+        # Model cache to avoid reloading (supports both PyTorch models and JudgingModel instances)
+        self._model_cache: Dict[str, Any] = {}
+        
+        # Register LLM judges if needed
+        self._register_judging_models()
 
         # Validate configuration
         self._validate_config()
@@ -82,13 +87,38 @@ class ExperimentRunner:
         if not self.config.FILL_STRATEGIES:
             raise ValueError("FILL_STRATEGIES cannot be empty")
 
-    def _get_cached_model(self, model_name: str) -> torch.nn.Module:
-        """Load model with caching."""
+    def _register_judging_models(self):
+        """Register judging model factories for LLM judges."""
+        # Register LlamaVision judge factory
+        try:
+            dataset_name = getattr(self.config, 'DATASET_NAME', 'imagenet')
+            factory = create_llamavision_judge_factory(dataset_name=dataset_name)
+            # Register common Ollama model names
+            ollama_models = ['llama3.2-vision', 'llama-vision', 'llama3.2:latest']
+            for model_name in ollama_models:
+                register_judging_model(model_name, factory)
+                logging.debug(f"Registered LlamaVision judge factory for {model_name}")
+        except Exception as e:
+            logging.warning(f"Failed to register LLM judges: {e}")
+    
+    def _get_cached_model(self, model_name: str) -> Any:
+        """
+        Load model with caching. Supports both PyTorch models and JudgingModel instances.
+        
+        Checks the judging model registry first. If not found, loads as PyTorch model.
+        """
         if model_name not in self._model_cache:
-            # logging.info(f"Loading model: {model_name}")
-            model = load_model(model_name)
-            model = self._maybe_compile_model(model, model_name)
-            self._model_cache[model_name] = model
+            # Check if it's a registered judging model (LLM judge)
+            judging_model = get_judging_model(model_name)
+            if judging_model is not None:
+                logging.info(f"Loading judging model from registry: {model_name}")
+                self._model_cache[model_name] = judging_model
+            else:
+                # Load as PyTorch model
+                logging.info(f"Loading PyTorch model: {model_name}")
+                model = load_model(model_name)
+                model = self._maybe_compile_model(model, model_name)
+                self._model_cache[model_name] = model
         return self._model_cache[model_name]
 
     def _maybe_compile_model(self, model: torch.nn.Module, model_name: str) -> torch.nn.Module:
@@ -264,9 +294,14 @@ class ExperimentRunner:
                     name: self._get_cached_model(name) for name in self.config.JUDGING_MODELS
                 }
 
-                # Convert judging models to FP16 for faster inference if enabled
+                # Convert PyTorch judging models to FP16 for faster inference if enabled
+                # Skip LLM judges (JudgingModel instances) as they don't support FP16
                 if self.config.USE_FP16_INFERENCE and self.config.DEVICE == "cuda" and self.gpu_manager.supports_fp16():
                     for name, model in judging_models.items():
+                        # Only convert PyTorch models, not JudgingModel instances
+                        if isinstance(model, JudgingModel):
+                            logging.debug(f"Skipping FP16 conversion for judging model {name} (not a PyTorch model)")
+                            continue
                         try:
                             judging_models[name] = model.half()
                             logging.debug(f"Converted {name} to FP16 for Phase 2 inference")
@@ -677,29 +712,48 @@ class ExperimentRunner:
             predictions = []
             for img in batch_images:
                 try:
-                    single_tensor = img.unsqueeze(0).to(self.config.DEVICE)
-                    with torch.inference_mode():  # Faster than no_grad
-                        if self.config.DEVICE == "cuda":
-                            with torch.amp.autocast(self.config.DEVICE, dtype=torch.float16):
+                    # Check if judge_model is a JudgingModel instance
+                    if isinstance(judge_model, JudgingModel):
+                        # Use JudgingModel.predict() interface
+                        pred = judge_model.predict([img])[0]
+                        predictions.append(pred)
+                    else:
+                        # PyTorch model fallback
+                        single_tensor = img.unsqueeze(0).to(self.config.DEVICE)
+                        with torch.inference_mode():  # Faster than no_grad
+                            if self.config.DEVICE == "cuda":
+                                with torch.amp.autocast(self.config.DEVICE, dtype=torch.float16):
+                                    outputs = judge_model(single_tensor)
+                            else:
                                 outputs = judge_model(single_tensor)
-                        else:
-                            outputs = judge_model(single_tensor)
 
-                        if isinstance(outputs, tuple):
-                            outputs = outputs[0]
-                        if isinstance(outputs, dict):
-                            outputs = outputs['logits']
-                        pred = torch.argmax(outputs, dim=1).item()
-                    predictions.append(pred)
+                            if isinstance(outputs, tuple):
+                                outputs = outputs[0]
+                            if isinstance(outputs, dict):
+                                outputs = outputs['logits']
+                            pred = torch.argmax(outputs, dim=1).item()
+                        predictions.append(pred)
                 except Exception as e2:
                     logging.warning(f"Single evaluation failed: {e2}")
-                    predictions.append(None)  # Invalid prediction marker
+                    predictions.append(-1)  # Invalid prediction marker
             return np.array(predictions, dtype=object)
 
     def _evaluate_batch_chunk(
             self, batch_images: List[torch.Tensor], judge_model
     ) -> np.ndarray:
         """Evaluate a chunk of images (actual batch processing)."""
+        # Check if judge_model is a JudgingModel instance (LLM judge)
+        if isinstance(judge_model, JudgingModel):
+            # Use JudgingModel.predict() interface
+            try:
+                predictions = judge_model.predict(batch_images)
+                return predictions
+            except Exception as e:
+                logging.error(f"Error evaluating with JudgingModel: {e}")
+                # Return invalid predictions
+                return np.array([-1] * len(batch_images), dtype=np.int64)
+        
+        # Otherwise, treat as PyTorch model (existing behavior)
         try:
             # Use non-blocking transfer for better GPU utilization
             # Stack on GPU directly if all images are already on GPU, otherwise use non_blocking

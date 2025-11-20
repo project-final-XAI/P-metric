@@ -1,0 +1,20 @@
+"""
+Judging model abstraction for evaluation.
+
+Supports different types of judging models (PyTorch, LLM, etc.)
+through a unified interface.
+"""
+
+from evaluation.judging.base import JudgingModel
+from evaluation.judging.pytorch_judge import PyTorchJudgingModel
+from evaluation.judging.llamavision import LlamaVisionJudge
+from evaluation.judging.registry import get_judging_model, register_judging_model
+
+__all__ = [
+    'JudgingModel',
+    'PyTorchJudgingModel',
+    'LlamaVisionJudge',
+    'get_judging_model',
+    'register_judging_model',
+]
+

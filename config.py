@@ -84,7 +84,7 @@ DATASET_NAME = "imagenet"
 GENERATING_MODELS = [
     "resnet50",
     # "mobilenet_v2",
-    "vgg16",
+    # "vgg16",
     # "vit_b_16",
     # "swin_t",
     # "sipakmed_resnet50.pth",
@@ -95,10 +95,11 @@ GENERATING_MODELS = [
 JUDGING_MODELS = [
     # "resnet50",
     # "vit_b_16",
-    "mobilenet_v2",
-    "swin_t",
+    # "mobilenet_v2",
+    # "swin_t",
     # "sipakmed_efficientnetB0.pth"
     # "sipakmed_cropped_efficientnet.pth",
+    "llama3.2-vision",
 ]
 
 # -----------------
@@ -116,7 +117,7 @@ ATTRIBUTION_METHODS = [
     "grad_cam",
     "guided_gradcam",
     "random_baseline",
-    "c3f",
+    # "c3f",
 ]
 
 # -----------------
