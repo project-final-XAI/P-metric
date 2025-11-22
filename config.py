@@ -22,6 +22,9 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 # Suppress torch dynamo verbose output
 os.environ["TORCHDYNAMO_VERBOSE"] = "0"
 
+# Suppress httpx (ollama) verbose logging
+os.environ["HTTPX_LOG_LEVEL"] = "WARNING"
+
 # Suppress warnings for cleaner output
 warnings.filterwarnings("ignore")
 
@@ -113,15 +116,12 @@ JUDGING_MODELS = [
     # "sipakmed_efficientnetB0.pth"
     # "sipakmed_cropped_efficientnet.pth",
     
-    # LLM judges - Different evaluation strategies:
+    # LLM judges - Two evaluation strategies:
     # 1. Binary approach: Asks "Do you see {category}? Yes/No"
     "llama3.2-vision-binary",
     
     # 2. Cosine similarity: Asks "What do you see?" and compares with embeddings
     # "llama3.2-vision-cosine",
-    
-    # 3. Original approach (not recommended, kept for compatibility)
-    # "llama3.2-vision",
 ]
 
 # -----------------

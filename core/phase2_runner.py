@@ -19,7 +19,7 @@ from core.file_manager import FileManager
 from core.progress_tracker import ProgressTracker
 from core.gpu_utils import (
     get_memory_usage, clear_cache_if_needed, sync_and_clear,
-    prepare_batch_tensor, calculate_safe_batch_size, warmup_gpu
+    prepare_batch_tensor, warmup_gpu
 )
 from data.loader import get_dataloader
 from evaluation.occlusion import apply_occlusion_batch

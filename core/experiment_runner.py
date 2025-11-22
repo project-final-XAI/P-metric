@@ -19,7 +19,6 @@ from core.phase3_runner import Phase3Runner
 from models.loader import load_model
 from evaluation.judging.registry import (
     get_judging_model, register_judging_model,
-    create_llamavision_judge_factory,
     create_binary_llm_judge_factory,
     create_cosine_llm_judge_factory
 )
@@ -114,13 +113,6 @@ class ExperimentRunner:
         """Register judging model factories for LLM judges."""
         try:
             dataset_name = getattr(self.config, 'DATASET_NAME', 'imagenet')
-            
-            # Register original LlamaVision judge
-            factory = create_llamavision_judge_factory(dataset_name=dataset_name)
-            ollama_models = ['llama3.2-vision', 'llama-vision', 'llama3.2:latest']
-            for model_name in ollama_models:
-                register_judging_model(model_name, factory)
-                logging.debug(f"Registered LlamaVision judge factory for {model_name}")
             
             # Register Binary LLM judges (Yes/No approach)
             binary_factory = create_binary_llm_judge_factory(

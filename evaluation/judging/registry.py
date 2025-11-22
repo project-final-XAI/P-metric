@@ -9,7 +9,6 @@ import logging
 
 from evaluation.judging.base import JudgingModel
 from evaluation.judging.pytorch_judge import PyTorchJudgingModel
-from evaluation.judging.llamavision import LlamaVisionJudge
 from evaluation.judging.binary_llm_judge import BinaryLLMJudge
 from evaluation.judging.cosine_llm_judge import CosineSimilarityLLMJudge
 
@@ -103,24 +102,6 @@ def create_pytorch_judging_model_factory(
                 logging.warning(f"Failed to convert {model_name} to FP16, using FP32: {e}")
         
         return PyTorchJudgingModel(model, model_name, device)
-    
-    return factory
-
-
-def create_llamavision_judge_factory(
-    dataset_name: str = "imagenet"
-) -> Callable[[str], JudgingModel]:
-    """
-    Create a factory function for LlamaVision judging models.
-    
-    Args:
-        dataset_name: Dataset name to use for class names (default: "imagenet")
-    
-    Returns:
-        Factory function that creates LlamaVisionJudge instances
-    """
-    def factory(model_name: str) -> LlamaVisionJudge:
-        return LlamaVisionJudge(model_name=model_name, dataset_name=dataset_name)
     
     return factory
 

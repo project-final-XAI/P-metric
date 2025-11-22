@@ -11,9 +11,13 @@ import numpy as np
 from typing import List, Tuple
 import os
 import logging
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from evaluation.judging.base_llm_judge import BaseLLMJudge, MAX_PARALLEL_WORKERS
+
+# Silence httpx logging from ollama
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 class CosineSimilarityLLMJudge(BaseLLMJudge):
@@ -48,15 +52,50 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
         self.similarity_threshold = similarity_threshold
         self.embedding_model = embedding_model
         
-        # Pre-compute class name embeddings
-        logging.info(f"Pre-computing embeddings for {len(self.class_names)} classes...")
-        self.class_embeddings = self._compute_class_embeddings()
+        # Load or compute class name embeddings
+        self.class_embeddings = self._load_or_compute_embeddings()
         
         logging.info(
             f"CosineSimilarityLLMJudge initialized: {len(self.class_names)} classes, "
             f"threshold={similarity_threshold}, temperature={temperature}"
         )
     
+    
+    def _load_or_compute_embeddings(self) -> np.ndarray:
+        """
+        Load embeddings from cache or compute if not cached.
+        
+        Returns:
+            Array of embeddings (shape: [num_classes, embedding_dim])
+        """
+        # Create cache directory
+        cache_dir = Path(".cache")
+        cache_dir.mkdir(exist_ok=True)
+        
+        # Cache file path
+        cache_file = cache_dir / f"embeddings_{self.dataset_name}_{self.embedding_model.replace('/', '_')}.npy"
+        
+        # Try to load from cache
+        if cache_file.exists():
+            try:
+                embeddings = np.load(cache_file)
+                logging.info(f"Loaded cached embeddings from {cache_file}")
+                return embeddings
+            except Exception as e:
+                logging.warning(f"Failed to load cached embeddings: {e}. Recomputing...")
+        
+        # Compute fresh embeddings
+        logging.info(f"Computing embeddings for {len(self.class_names)} classes (this may take 2-3 minutes)...")
+        embeddings = self._compute_class_embeddings()
+        
+        # Save to cache
+        try:
+            np.save(cache_file, embeddings)
+            logging.info(f"Saved embeddings to cache: {cache_file}")
+        except Exception as e:
+            logging.warning(f"Failed to save embeddings to cache: {e}")
+        
+        return embeddings
     
     def _compute_class_embeddings(self) -> np.ndarray:
         """

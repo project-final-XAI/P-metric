@@ -19,6 +19,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from evaluation.judging.base_llm_judge import BaseLLMJudge, MAX_PARALLEL_WORKERS
 
+# Silence httpx logging from ollama
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 
 class BinaryLLMJudge(BaseLLMJudge):
     """

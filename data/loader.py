@@ -6,9 +6,10 @@ Handles dataset loading, preprocessing, and preparation.
 
 import os
 import logging
+import torch
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from config import DATASET_CONFIG
+from config import DATASET_CONFIG, MAX_WORKERS
 
 
 def get_default_transforms() -> transforms.Compose:
@@ -63,9 +64,6 @@ def get_dataloader(dataset_name: str, batch_size: int = 1, shuffle: bool = False
     logging.info(f"Found {len(image_folder)} images in {dataset_path}")
 
     # Auto-adjust workers and pin_memory based on device
-    import torch
-    from config import MAX_WORKERS
-    
     # Optimized settings for high-performance systems
     if torch.cuda.is_available():
         num_workers = MAX_WORKERS  # Use config value (8 for powerful CPUs)

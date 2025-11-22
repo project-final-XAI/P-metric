@@ -6,6 +6,9 @@ Maps synset IDs (like n01440764) to readable class names (like "tench, Tinca tin
 
 from typing import Dict, Optional
 import logging
+import os
+
+from config import DATASET_CONFIG
 
 
 def get_imagenet_class_mapping() -> Dict[str, str]:
@@ -30,9 +33,6 @@ def get_imagenet_class_mapping() -> Dict[str, str]:
         # Now we need to map these to synset IDs
         # The order matches ImageNet's synset order (alphabetically sorted)
         # We'll need the synset IDs from the dataset folder
-        from config import DATASET_CONFIG
-        import os
-        
         dataset_path = DATASET_CONFIG.get("imagenet", {}).get("path")
         if dataset_path and os.path.exists(dataset_path):
             synset_ids = sorted([d for d in os.listdir(dataset_path) 
@@ -48,9 +48,6 @@ def get_imagenet_class_mapping() -> Dict[str, str]:
     
     # Fallback: Try to extract names from file names
     try:
-        from config import DATASET_CONFIG
-        import os
-        
         dataset_path = DATASET_CONFIG.get("imagenet", {}).get("path")
         if dataset_path and os.path.exists(dataset_path):
             mapping = {}

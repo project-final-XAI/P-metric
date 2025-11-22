@@ -141,28 +141,6 @@ class GPUManager:
     
     # ------------------------------ Memory Management ------------------------------
     
-    def get_memory_usage(self):
-        """
-        Get current GPU memory usage.
-        
-        Returns:
-            Tuple of (total_gb, usage_percent). Returns (0.0, 0.0) on CPU.
-        """
-        return get_memory_usage() # Returns from gpu_utils.py
-    
-    def clear_cache_if_needed(self, threshold_percent: float = 75.0) -> None:
-        """
-        Clear CUDA cache if memory usage exceeds threshold.
-        
-        Args:
-            threshold_percent: Memory usage threshold (0-100) to trigger cache clear
-        """
-        clear_cache_if_needed(threshold_percent) # Returns from gpu_utils.py
-    
-    def sync_and_clear(self) -> None:
-        """Synchronize GPU operations and clear cache."""
-        sync_and_clear()
-    
     # Lookup table for memory-based batch size multipliers (cleaner than nested ifs)
     _MEMORY_USAGE_MULTIPLIERS = [
         (20.0, 4.0),   # < 20% usage

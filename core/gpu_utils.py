@@ -143,38 +143,6 @@ def prepare_batch_tensor(
     return batch_tensor
 
 
-def calculate_safe_batch_size(
-    desired_size: int,
-    current_memory_usage_percent: float,
-    throttle_factor: float = 1.0
-) -> int:
-    """
-    Calculate safe batch size based on current GPU memory usage.
-    
-    This function adjusts batch size dynamically based on:
-    - Current memory usage (reduce if high)
-    - Thermal throttling factor (reduce if GPU is hot)
-    
-    Args:
-        desired_size: Desired batch size
-        current_memory_usage_percent: Current GPU memory usage (0-100)
-        throttle_factor: Thermal throttling multiplier (0-1, 1.0 = no throttling)
-        
-    Returns:
-        Safe batch size (at least 1)
-    """
-    # Apply thermal throttling first
-    safe_size = int(desired_size * throttle_factor)
-    
-    # Adjust based on memory usage
-    if current_memory_usage_percent < 85.0:
-        return max(1, safe_size)
-    elif current_memory_usage_percent < 92.0:
-        return max(1, safe_size // 2)
-    else:
-        return max(1, safe_size // 4)
-
-
 def warmup_gpu(device: str, sample_shape: Tuple[int, ...], use_fp16: bool = False) -> None:
     """
     Warm up GPU memory allocator to reduce first-batch allocation overhead.

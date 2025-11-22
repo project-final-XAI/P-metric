@@ -17,45 +17,6 @@ from config import DEVICE
 # Fill Strategy Implementations
 # -----------------
 
-# Cache blur transform to avoid repeated creation (performance optimization)
-_BLUR_TRANSFORM_CACHE = None
-
-# Cache random noise tensor to avoid repeated generation (performance optimization)
-_RANDOM_NOISE_CACHE = None
-
-
-def _get_blur_transform():
-    """
-    Get or create cached blur transform.
-    
-    Returns:
-        GaussianBlur transform instance
-    """
-    global _BLUR_TRANSFORM_CACHE
-    if _BLUR_TRANSFORM_CACHE is None:
-        _BLUR_TRANSFORM_CACHE = transforms.GaussianBlur(kernel_size=21, sigma=10)
-    return _BLUR_TRANSFORM_CACHE
-
-
-def _get_random_noise(shape: Tuple[int, ...], device: torch.device) -> torch.Tensor:
-    """
-    Get or create cached random noise tensor.
-    
-    Args:
-        shape: Shape of the noise tensor
-        device: Device to create tensor on
-        
-    Returns:
-        Random noise tensor
-    """
-    global _RANDOM_NOISE_CACHE
-    if (_RANDOM_NOISE_CACHE is None or 
-        _RANDOM_NOISE_CACHE.shape != shape or 
-        _RANDOM_NOISE_CACHE.device != device):
-        _RANDOM_NOISE_CACHE = torch.rand(shape, device=device)
-    return _RANDOM_NOISE_CACHE
-
-
 def _fill_gray(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """Fill masked area with solid gray color."""
     occluded_image = image.clone()
@@ -64,8 +25,8 @@ def _fill_gray(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 
 
 def _fill_blur(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Fill masked area with blurred version of image (optimized: reuse blurred result)."""
-    blur_transform = _get_blur_transform()
+    """Fill masked area with blurred version of image."""
+    blur_transform = transforms.GaussianBlur(kernel_size=21, sigma=10)
     blurred_image = blur_transform(image)
     # Use blurred image as base and restore non-masked pixels (more efficient for large masks)
     if mask.sum() > mask.numel() * 0.5:  # If more than 50% masked
@@ -78,9 +39,9 @@ def _fill_blur(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 
 
 def _fill_random_noise(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Fill masked area with cached random noise."""
+    """Fill masked area with random noise."""
     occluded_image = image.clone()
-    noise = _get_random_noise(image.shape, image.device)
+    noise = torch.rand(image.shape, device=image.device)
     occluded_image[:, mask] = noise[:, mask]
     return occluded_image
 
@@ -306,32 +267,3 @@ def apply_occlusion_batch(
     # Cleanup: masks tensor freed automatically when out of scope
     return occluded_images
 
-
-def evaluate_judging_model(
-    judging_model: torch.nn.Module,
-    masked_image: torch.Tensor,
-    true_label: int
-) -> int:
-    """
-    Evaluate judging model's prediction on masked image.
-    
-    Args:
-        judging_model: Pre-trained model for evaluation
-        masked_image: Occluded image tensor (with batch dimension)
-        true_label: Correct class index for the image
-        
-    Returns:
-        1 if prediction is correct, 0 otherwise
-    """
-    with torch.no_grad():
-        output = judging_model(masked_image)
-        
-        # Handle different output formats
-        if isinstance(output, tuple):
-            output = output[0]
-        if isinstance(output, dict):
-            output = output['logits']
-        
-        prediction = torch.argmax(output, dim=1).item()
-    
-    return 1 if prediction == true_label else 0

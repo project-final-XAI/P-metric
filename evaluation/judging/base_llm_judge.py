@@ -8,18 +8,54 @@ import torch
 import tempfile
 import os
 import logging
+import numpy as np
 from typing import List, Dict
 from abc import abstractmethod
+from PIL import Image
 
-from evaluation.judging.LLM_judge_interface import LLMJudgeInterface
-from evaluation.judging.llamavision import tensor_to_pil_image
+from config import DATASET_CONFIG
+from evaluation.judging.base import JudgingModel
+from data.imagenet_class_mapping import get_cached_mapping, format_class_for_llm
 
 
 # Maximum parallel workers for all LLM judges
 MAX_PARALLEL_WORKERS = 6
 
 
-class BaseLLMJudge(LLMJudgeInterface):
+def tensor_to_pil_image(tensor: torch.Tensor) -> Image.Image:
+    """
+    Convert normalized torch tensor to PIL Image.
+    
+    Args:
+        tensor: Normalized tensor (C, H, W) with ImageNet normalization (can be on GPU or CPU)
+        
+    Returns:
+        PIL Image in RGB format
+    """
+    # Move tensor to CPU first to avoid device mismatch issues
+    img_tensor = tensor.cpu().clone()
+    
+    # Denormalize ImageNet normalization
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+    
+    # Denormalize
+    img_tensor = img_tensor * std + mean
+    
+    # Clamp to [0, 1]
+    img_tensor = torch.clamp(img_tensor, 0, 1)
+    
+    # Convert to numpy and scale to 0-255
+    img_array = (img_tensor.numpy() * 255).astype(np.uint8)
+    
+    # Convert from CHW to HWC
+    img_array = np.transpose(img_array, (1, 2, 0))
+    
+    # Convert to PIL Image
+    return Image.fromarray(img_array)
+
+
+class BaseLLMJudge(JudgingModel):
     """
     Base class for LLM judges providing shared functionality.
     
@@ -56,8 +92,6 @@ class BaseLLMJudge(LLMJudgeInterface):
         Returns:
             List of class names (synset IDs for ImageNet, folder names for others)
         """
-        from config import DATASET_CONFIG
-        
         if self.dataset_name == "imagenet":
             dataset_path = DATASET_CONFIG.get("imagenet", {}).get("path")
             if dataset_path and os.path.exists(dataset_path):
@@ -96,7 +130,6 @@ class BaseLLMJudge(LLMJudgeInterface):
         """
         if self.dataset_name == "imagenet":
             try:
-                from data.imagenet_class_mapping import get_cached_mapping
                 mapping = get_cached_mapping()
                 logging.info(f"Loaded ImageNet class mapping with {len(mapping)} entries")
                 return mapping
@@ -121,7 +154,6 @@ class BaseLLMJudge(LLMJudgeInterface):
         if class_name in self.class_name_mapping:
             readable_name = self.class_name_mapping[class_name]
             # Format for LLM: take first part if there's a comma
-            from data.imagenet_class_mapping import format_class_for_llm
             return format_class_for_llm(readable_name)
         
         # Replace underscores with spaces for other datasets

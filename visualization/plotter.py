@@ -50,6 +50,12 @@ def plot_accuracy_degradation_curves(
             linewidth=2.5
         )
         
+        # Calculate dynamic x-axis range from actual data
+        x_min = group_df[x_col].min()
+        x_max = group_df[x_col].max()
+        x_range = x_max - x_min
+        x_padding = max(2, x_range * 0.02)  # At least 2% padding, or 2 units
+        
         plt.title(
             f"Accuracy Degradation\nGenerator: {gen_model} | Judge: {judge_model} | Fill: {fill_strat}",
             fontsize=16
@@ -57,7 +63,7 @@ def plot_accuracy_degradation_curves(
         plt.xlabel("Percentage of Pixels Removed (%)", fontsize=12)
         plt.ylabel("Top-1 Accuracy", fontsize=12)
         plt.ylim(-0.05, 1.05)
-        plt.xlim(-2, 102)
+        plt.xlim(x_min - x_padding, x_max + x_padding)
         plt.legend(title=hue_col.replace('_', ' ').title())
         
         filename = f"{gen_model}_{judge_model}_{fill_strat}.png"
@@ -88,23 +94,17 @@ def plot_fill_strategy_comparison(
     # Average across all models and methods, grouping only by strategy and level
     strategy_df = results_df.groupby(['fill_strategy', x_col])[y_col].mean().reset_index()
     
-    # Add boundary points (0%, 1) and (100%, 0) for each strategy
-    extended_df = strategy_df.copy()
-    for strategy in strategy_df['fill_strategy'].unique():
-        extended_df = pd.concat([
-            extended_df,
-            pd.DataFrame({
-                'fill_strategy': [strategy, strategy],
-                x_col: [0, 100],
-                y_col: [1, 0]
-            })
-        ])
+    # Calculate dynamic x-axis range from ACTUAL data (before adding boundary points)
+    x_min = strategy_df[x_col].min()
+    x_max = strategy_df[x_col].max()
+    x_range = x_max - x_min
+    x_padding = max(2, x_range * 0.02)  # At least 2% padding, or 2 units
     
     plt.figure(figsize=(12, 8))
     sns.set_theme(style="whitegrid")
     
     plot = sns.lineplot(
-        data=extended_df,
+        data=strategy_df,
         x=x_col,
         y=y_col,
         hue='fill_strategy',
@@ -121,7 +121,7 @@ def plot_fill_strategy_comparison(
     plt.xlabel("Percentage of Pixels Removed (%)", fontsize=14)
     plt.ylabel("Top-1 Accuracy", fontsize=14)
     plt.ylim(-0.05, 1.05)
-    plt.xlim(-2, 102)
+    plt.xlim(x_min - x_padding, x_max + x_padding)
     plt.legend(title='Fill Strategy', fontsize=12, title_fontsize=13)
     plt.grid(True, alpha=0.3)
     
