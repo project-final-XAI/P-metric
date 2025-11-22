@@ -79,6 +79,13 @@ class LlamaVisionJudge(LLMJudgeInterface):
         if not self.class_names:
             raise ValueError(f"Could not load class names for dataset: {dataset_name}")
         
+        # Load ImageNet class mapping (synset ID -> readable name)
+        self.class_name_mapping = {}
+        if dataset_name == "imagenet":
+            from data.imagenet_class_mapping import get_cached_mapping
+            self.class_name_mapping = get_cached_mapping()
+            logging.info(f"Loaded ImageNet class mapping with {len(self.class_name_mapping)} entries")
+        
         logging.info(f"LlamaVisionJudge initialized with {len(self.class_names)} classes")
     
     def _load_class_names(self) -> List[str]:
@@ -209,11 +216,20 @@ class LlamaVisionJudge(LLMJudgeInterface):
         
         # Prepare prompt (reused for all images)
         dataset_type = "ImageNet" if self.dataset_name == "imagenet" else self.dataset_name
-        prompt = (
-            f"Look at this image. What {dataset_type} class do you see? "
-            "Answer with just the class name or synset ID (e.g., 'tench' or 'n01440764'). "
-            "If you don't recognize any class from this dataset, say 'none'."
-        )
+        
+        # For ImageNet, we now have readable class names
+        if self.dataset_name == "imagenet":
+            prompt = (
+                f"Look at this image. What {dataset_type} object do you see? "
+                "Answer with just the main object name (e.g., 'tench', 'goldfish', 'great white shark'). "
+                "If you don't recognize any object, say 'none'."
+            )
+        else:
+            prompt = (
+                f"Look at this image. What {dataset_type} class do you see? "
+                "Answer with just the class name. "
+                "If you don't recognize any class from this dataset, say 'none'."
+            )
         
         # Process images in parallel using ThreadPoolExecutor
         # Limit workers to avoid overwhelming Ollama API
@@ -244,7 +260,7 @@ class LlamaVisionJudge(LLMJudgeInterface):
         Match LLM response text to a class name or synset ID.
         
         Args:
-            response_text: LLM response (e.g., "tench" or "n01440764")
+            response_text: LLM response (e.g., "tench" or "goldfish")
             
         Returns:
             Class index if found, -1 otherwise
@@ -255,12 +271,31 @@ class LlamaVisionJudge(LLMJudgeInterface):
         if response_lower in ['none', 'no class', 'nothing', 'unknown']:
             return -1
         
-        # Try exact match first
+        # For ImageNet: try matching with readable names
+        if self.class_name_mapping:
+            from data.imagenet_class_mapping import format_class_for_llm
+            
+            # Try exact match with formatted readable names
+            for idx, class_name in enumerate(self.class_names):
+                if class_name in self.class_name_mapping:
+                    readable_name = format_class_for_llm(self.class_name_mapping[class_name])
+                    if response_lower == readable_name.lower():
+                        return idx
+            
+            # Try partial match with readable names
+            for idx, class_name in enumerate(self.class_names):
+                if class_name in self.class_name_mapping:
+                    readable_name = format_class_for_llm(self.class_name_mapping[class_name])
+                    readable_lower = readable_name.lower()
+                    if readable_lower in response_lower or response_lower in readable_lower:
+                        return idx
+        
+        # Try exact match with synset IDs (fallback)
         for idx, class_name in enumerate(self.class_names):
             if response_lower == class_name.lower():
                 return idx
         
-        # Try partial match (response contains class name)
+        # Try partial match with synset IDs
         for idx, class_name in enumerate(self.class_names):
             class_lower = class_name.lower()
             if class_lower in response_lower or response_lower in class_lower:

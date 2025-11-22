@@ -367,7 +367,7 @@ class Phase2Runner:
                 masked_images, batch_labels, batch_info = occluded_batch
                 
                 # Evaluate batch on GPU
-                predictions = self._evaluate_batch(masked_images, judge_model)
+                predictions = self._evaluate_batch(masked_images, judge_model, batch_labels)
                 del masked_images  # Free memory immediately
                 
                 # Record results
@@ -404,7 +404,8 @@ class Phase2Runner:
     def _evaluate_batch(
         self,
         batch_images: List[torch.Tensor],
-        judge_model: Any
+        judge_model: Any,
+        batch_labels: List[int] = None
     ) -> np.ndarray:
         """
         Evaluate a batch of images with the judging model.
@@ -415,6 +416,7 @@ class Phase2Runner:
         Args:
             batch_images: List of image tensors
             judge_model: Judging model instance
+            batch_labels: List of true labels (optional, used by some LLM judges)
             
         Returns:
             Array of predicted class indices
@@ -435,20 +437,21 @@ class Phase2Runner:
             # Process in chunks if batch is too large
             if len(batch_images) > safe_batch_size:
                 return self._evaluate_batch_in_chunks(
-                    batch_images, judge_model, safe_batch_size
+                    batch_images, judge_model, safe_batch_size, batch_labels
                 )
             else:
-                return self._evaluate_batch_chunk(batch_images, judge_model)
+                return self._evaluate_batch_chunk(batch_images, judge_model, batch_labels)
         
         except Exception as e:
             logging.warning(f"Batch evaluation error: {e}, falling back to single")
-            return self._evaluate_single_fallback(batch_images, judge_model)
+            return self._evaluate_single_fallback(batch_images, judge_model, batch_labels)
     
     def _evaluate_batch_in_chunks(
         self,
         batch_images: List[torch.Tensor],
         judge_model: Any,
-        chunk_size: int
+        chunk_size: int,
+        batch_labels: List[int] = None
     ) -> np.ndarray:
         """
         Evaluate large batch by splitting into smaller chunks.
@@ -457,6 +460,7 @@ class Phase2Runner:
             batch_images: List of image tensors
             judge_model: Judging model instance
             chunk_size: Size of each chunk
+            batch_labels: List of true labels (optional)
             
         Returns:
             Array of predicted class indices
@@ -466,7 +470,8 @@ class Phase2Runner:
         
         for i in range(0, len(batch_images), chunk_size):
             chunk = batch_images[i:i + chunk_size]
-            chunk_predictions = self._evaluate_batch_chunk(chunk, judge_model)
+            chunk_labels = batch_labels[i:i + chunk_size] if batch_labels else None
+            chunk_predictions = self._evaluate_batch_chunk(chunk, judge_model, chunk_labels)
             all_predictions.extend(chunk_predictions)
             del chunk
             
@@ -483,7 +488,8 @@ class Phase2Runner:
     def _evaluate_batch_chunk(
         self,
         batch_images: List[torch.Tensor],
-        judge_model: Any
+        judge_model: Any,
+        batch_labels: List[int] = None
     ) -> np.ndarray:
         """
         Evaluate a chunk of images (actual batch processing).
@@ -491,6 +497,7 @@ class Phase2Runner:
         Args:
             batch_images: List of image tensors
             judge_model: Judging model instance
+            batch_labels: List of true labels (optional)
             
         Returns:
             Array of predicted class indices
@@ -498,7 +505,11 @@ class Phase2Runner:
         # Handle LLM judges (JudgingModel instances)
         if isinstance(judge_model, JudgingModel):
             try:
-                return judge_model.predict(batch_images)
+                # Pass labels if available (for Binary LLM judge)
+                if batch_labels is not None:
+                    return judge_model.predict(batch_images, true_labels=batch_labels)
+                else:
+                    return judge_model.predict(batch_images)
             except Exception as e:
                 logging.error(f"Error evaluating with JudgingModel: {e}")
                 return np.array([-1] * len(batch_images), dtype=np.int64)
@@ -562,7 +573,8 @@ class Phase2Runner:
     def _evaluate_single_fallback(
         self,
         batch_images: List[torch.Tensor],
-        judge_model: Any
+        judge_model: Any,
+        batch_labels: List[int] = None
     ) -> np.ndarray:
         """
         Fallback: evaluate images one at a time if batch processing fails.
@@ -570,16 +582,20 @@ class Phase2Runner:
         Args:
             batch_images: List of image tensors
             judge_model: Judging model instance
+            batch_labels: List of true labels (optional)
             
         Returns:
             Array of predicted class indices
         """
         predictions = []
         
-        for img in batch_images:
+        for idx, img in enumerate(batch_images):
             try:
                 if isinstance(judge_model, JudgingModel):
-                    pred = judge_model.predict([img])[0]
+                    if batch_labels is not None:
+                        pred = judge_model.predict([img], true_labels=[batch_labels[idx]])[0]
+                    else:
+                        pred = judge_model.predict([img])[0]
                     predictions.append(pred)
                 else:
                     single_tensor = img.unsqueeze(0).to(self.config.DEVICE)

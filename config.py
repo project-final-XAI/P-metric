@@ -105,13 +105,23 @@ GENERATING_MODELS = [
 
 # Models used for evaluating occluded images (Phase 2)
 JUDGING_MODELS = [
+    # PyTorch models
     # "resnet50",
     # "vit_b_16",
     # "mobilenet_v2",
     # "swin_t",
     # "sipakmed_efficientnetB0.pth"
     # "sipakmed_cropped_efficientnet.pth",
-    "llama3.2-vision",
+    
+    # LLM judges - Different evaluation strategies:
+    # 1. Binary approach: Asks "Do you see {category}? Yes/No"
+    "llama3.2-vision-binary",
+    
+    # 2. Cosine similarity: Asks "What do you see?" and compares with embeddings
+    # "llama3.2-vision-cosine",
+    
+    # 3. Original approach (not recommended, kept for compatibility)
+    # "llama3.2-vision",
 ]
 
 # -----------------

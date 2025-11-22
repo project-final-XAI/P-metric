@@ -17,7 +17,12 @@ from core.phase1_runner import Phase1Runner
 from core.phase2_runner import Phase2Runner
 from core.phase3_runner import Phase3Runner
 from models.loader import load_model
-from evaluation.judging.registry import get_judging_model, register_judging_model, create_llamavision_judge_factory
+from evaluation.judging.registry import (
+    get_judging_model, register_judging_model,
+    create_llamavision_judge_factory,
+    create_binary_llm_judge_factory,
+    create_cosine_llm_judge_factory
+)
 from evaluation.judging.base import JudgingModel
 
 # Setup logging (separate from tqdm stdout)
@@ -109,12 +114,36 @@ class ExperimentRunner:
         """Register judging model factories for LLM judges."""
         try:
             dataset_name = getattr(self.config, 'DATASET_NAME', 'imagenet')
+            
+            # Register original LlamaVision judge
             factory = create_llamavision_judge_factory(dataset_name=dataset_name)
-            # Register common Ollama model names
             ollama_models = ['llama3.2-vision', 'llama-vision', 'llama3.2:latest']
             for model_name in ollama_models:
                 register_judging_model(model_name, factory)
                 logging.debug(f"Registered LlamaVision judge factory for {model_name}")
+            
+            # Register Binary LLM judges (Yes/No approach)
+            binary_factory = create_binary_llm_judge_factory(
+                dataset_name=dataset_name,
+                temperature=0.0  # Deterministic for accuracy
+            )
+            binary_models = ['llama3.2-vision-binary', 'llama-vision-binary']
+            for model_name in binary_models:
+                register_judging_model(model_name, binary_factory)
+                logging.debug(f"Registered Binary LLM judge factory for {model_name}")
+            
+            # Register Cosine Similarity LLM judges
+            cosine_factory = create_cosine_llm_judge_factory(
+                dataset_name=dataset_name,
+                temperature=0.1,  # Low temperature for consistency
+                similarity_threshold=0.8,  # Threshold for acceptance
+                embedding_model="nomic-embed-text"
+            )
+            cosine_models = ['llama3.2-vision-cosine', 'llama-vision-cosine']
+            for model_name in cosine_models:
+                register_judging_model(model_name, cosine_factory)
+                logging.debug(f"Registered Cosine Similarity LLM judge factory for {model_name}")
+                
         except Exception as e:
             logging.warning(f"Failed to register LLM judges: {e}")
     
