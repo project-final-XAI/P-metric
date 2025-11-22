@@ -1,31 +1,22 @@
 """
 Main experiment orchestration for CROSS-XAI evaluation.
 
-Coordinates the 3-phase pipeline:
-1. Heatmap generation (attribution maps)
-2. Occlusion-based evaluation
-3. Metrics calculation and visualization
+Coordinates the 3-phase pipeline by delegating to phase-specific runners:
+1. Phase 1: Heatmap generation (attribution maps)
+2. Phase 2: Occlusion-based evaluation
+3. Phase 3: Metrics calculation and visualization
 """
 
 import os
-import csv
-import numpy as np
-from pathlib import Path
-from tqdm import tqdm
-import torch
 import logging
-from typing import Dict, List, Tuple, Any
-from collections import defaultdict
+import torch
 
 from core.gpu_manager import GPUManager
 from core.file_manager import FileManager
-from core.progress_tracker import ProgressTracker
-from attribution.registry import get_attribution_method, get_all_methods
+from core.phase1_runner import Phase1Runner
+from core.phase2_runner import Phase2Runner
+from core.phase3_runner import Phase3Runner
 from models.loader import load_model
-from data.loader import get_dataloader
-from evaluation.occlusion import sort_pixels, apply_occlusion, evaluate_judging_model
-from evaluation.metrics import calculate_auc, calculate_drop
-from visualization.plotter import plot_accuracy_degradation_curves, plot_fill_strategy_comparison
 from evaluation.judging.registry import get_judging_model, register_judging_model, create_llamavision_judge_factory
 from evaluation.judging.base import JudgingModel
 
@@ -40,40 +31,67 @@ logging.basicConfig(
 
 
 class ExperimentRunner:
-    """Main experiment orchestrator."""
-
+    """
+    Main experiment orchestrator.
+    
+    Coordinates the 3-phase pipeline by delegating to phase-specific runners.
+    Maintains shared resources like GPU manager, file manager, and model cache.
+    """
+    
     def __init__(self, config):
+        """
+        Initialize experiment runner.
+        
+        Args:
+            config: Configuration object with experiment parameters
+        """
         self.config = config
-
+        
         # Normalize deprecated allocator env var to silence warnings
-        try:
-            import os as _os
-            if "PYTORCH_CUDA_ALLOC_CONF" in _os.environ and "PYTORCH_ALLOC_CONF" not in _os.environ:
-                _os.environ["PYTORCH_ALLOC_CONF"] = _os.environ["PYTORCH_CUDA_ALLOC_CONF"]
-                del _os.environ["PYTORCH_CUDA_ALLOC_CONF"]
-        except Exception:
-            pass
-
+        self._normalize_allocator_env()
+        
+        # Initialize shared resources
         self.gpu_manager = GPUManager()
         self.gpu_manager.print_info()
-
-        # Initialize file manager for centralized file operations
+        
         self.file_manager = FileManager(config.BASE_DIR)
-
-        # Create base directories
-        self.file_manager.ensure_dir_exists(self.file_manager.heatmap_dir)
-        self.file_manager.ensure_dir_exists(self.file_manager.results_dir)
-        self.file_manager.ensure_dir_exists(self.file_manager.analysis_dir)
-
+        self._ensure_directories()
+        
         # Model cache to avoid reloading (supports both PyTorch models and JudgingModel instances)
-        self._model_cache: Dict[str, Any] = {}
+        self._model_cache = {}
         
         # Register LLM judges if needed
         self._register_judging_models()
-
+        
         # Validate configuration
         self._validate_config()
-
+        
+        # Initialize phase runners
+        self.phase1_runner = Phase1Runner(
+            config, self.gpu_manager, self.file_manager, self._model_cache
+        )
+        self.phase2_runner = Phase2Runner(
+            config, self.gpu_manager, self.file_manager, self._model_cache
+        )
+        self.phase3_runner = Phase3Runner(
+            config, self.file_manager
+        )
+    
+    def _normalize_allocator_env(self):
+        """Normalize deprecated PYTORCH_CUDA_ALLOC_CONF environment variable."""
+        try:
+            if "PYTORCH_CUDA_ALLOC_CONF" in os.environ and "PYTORCH_ALLOC_CONF" not in os.environ:
+                os.environ["PYTORCH_ALLOC_CONF"] = os.environ["PYTORCH_CUDA_ALLOC_CONF"]
+                del os.environ["PYTORCH_CUDA_ALLOC_CONF"]
+        except Exception:
+            pass
+    
+    def _ensure_directories(self):
+        """Create base directories if they don't exist."""
+        self.file_manager.ensure_dir_exists(self.file_manager.heatmap_dir)
+        self.file_manager.ensure_dir_exists(self.file_manager.results_dir)
+        self.file_manager.ensure_dir_exists(self.file_manager.analysis_dir)
+    
     def _validate_config(self):
         """Validate configuration parameters."""
         if not self.config.GENERATING_MODELS:
@@ -86,10 +104,9 @@ class ExperimentRunner:
             raise ValueError("OCCLUSION_LEVELS cannot be empty")
         if not self.config.FILL_STRATEGIES:
             raise ValueError("FILL_STRATEGIES cannot be empty")
-
+    
     def _register_judging_models(self):
         """Register judging model factories for LLM judges."""
-        # Register LlamaVision judge factory
         try:
             dataset_name = getattr(self.config, 'DATASET_NAME', 'imagenet')
             factory = create_llamavision_judge_factory(dataset_name=dataset_name)
@@ -101,11 +118,17 @@ class ExperimentRunner:
         except Exception as e:
             logging.warning(f"Failed to register LLM judges: {e}")
     
-    def _get_cached_model(self, model_name: str) -> Any:
+    def _get_cached_model(self, model_name: str):
         """
         Load model with caching. Supports both PyTorch models and JudgingModel instances.
         
         Checks the judging model registry first. If not found, loads as PyTorch model.
+        
+        Args:
+            model_name: Name of the model to load
+            
+        Returns:
+            Model instance (PyTorch model or JudgingModel)
         """
         if model_name not in self._model_cache:
             # Check if it's a registered judging model (LLM judge)
@@ -120,866 +143,28 @@ class ExperimentRunner:
                 model = self._maybe_compile_model(model, model_name)
                 self._model_cache[model_name] = model
         return self._model_cache[model_name]
-
+    
     def _maybe_compile_model(self, model: torch.nn.Module, model_name: str) -> torch.nn.Module:
         """
-        Always use eager mode. torch.compile is disabled in code for maximum compatibility.
+        Model compilation hook (currently disabled for maximum compatibility).
+        
+        Args:
+            model: PyTorch model
+            model_name: Name of the model
+            
+        Returns:
+            Model (unchanged, compilation disabled)
         """
         return model
-
+    
     def run_phase_1(self):
-        """Generate heatmaps for all model-method-image combinations."""
-
-        dataset_name = self.config.DATASET_NAME
-        # Validate dataset name
-        if dataset_name not in self.config.DATASET_CONFIG:
-            raise ValueError(
-                f"Dataset '{dataset_name}' not found in DATASET_CONFIG. "
-                f"Available datasets: {list(self.config.DATASET_CONFIG.keys())}"
-            )
-
-        logging.info(f"Starting Phase 1 - Dataset: {dataset_name}")
-        logging.info(
-            f"Models: {len(self.config.GENERATING_MODELS)} | Methods: {len(self.config.ATTRIBUTION_METHODS)} | Storage: Sorted only")
-
-        try:
-            # Ensure dataset heatmap directory exists
-            heatmap_dir = self.file_manager.get_heatmap_dir(dataset_name)
-            self.file_manager.ensure_dir_exists(heatmap_dir)
-
-            # Load dataset once
-            dataloader = get_dataloader(dataset_name, batch_size=1, shuffle=False)
-            image_label_map = {
-                f"image_{i:05d}": (img, lbl.item())
-                for i, (img, lbl) in enumerate(dataloader)
-            }
-
-            # Process each model with progress bar
-            total_combinations = len(self.config.GENERATING_MODELS) * len(self.config.ATTRIBUTION_METHODS)
-            with tqdm(total=total_combinations, desc="Phase 1 Progress") as pbar:
-                for model_idx, model_name in enumerate(self.config.GENERATING_MODELS, 1):
-                    model = self._get_cached_model(model_name)
-
-                    for method_idx, method_name in enumerate(self.config.ATTRIBUTION_METHODS, 1):
-                        pbar.set_description(
-                            f"[{model_idx}/{len(self.config.GENERATING_MODELS)}] {model_name[:12]} | [{method_idx}/{len(self.config.ATTRIBUTION_METHODS)}] {method_name[:15]}")
-                        try:
-                            self._process_method_batch(
-                                model, model_name, method_name,
-                                image_label_map, dataset_name
-                            )
-                        except Exception as e:
-                            logging.error(f"Error: {model_name}-{method_name}: {e}")
-                        finally:
-                            pbar.update(1)
-
-            logging.info(f"Heatmaps saved to: {heatmap_dir}")
-        except Exception as e:
-            logging.error(f"Phase 1 failed: {e}")
-            raise
-
-    def _process_method_batch(
-            self, model, model_name, method_name,
-            image_label_map, dataset_name
-    ):
-        """Process a batch of images for specific model-method combination."""
-        method = get_attribution_method(method_name)
-        batch_size = self.gpu_manager.get_batch_size(method_name)
-
-        # Collect images to process
-        images_to_process = []
-        image_ids = []
-        labels = []
-
-        for img_id, (img, label) in list(image_label_map.items()):
-            # Use FileManager to get paths with dataset
-            sorted_path = self.file_manager.get_heatmap_path(
-                dataset_name, model_name, method_name, img_id, sorted=True
-            )
-
-            # Check if sorted indices file exists
-            files_missing = not sorted_path.exists()
-
-            # Process if any required file is missing
-            if files_missing:
-                images_to_process.append(img)
-                image_ids.append(img_id)
-                labels.append(label)
-
-        if not images_to_process:
-            return
-
-        # Process in batches with inner progress bar
-        for i in tqdm(range(0, len(images_to_process), batch_size),
-                      desc=f"  → Processing {len(images_to_process)} images", dynamic_ncols=True):
-            # Periodic thermal check every 5 batches
-            if i > 0 and i % (batch_size * 5) == 0:
-                self.gpu_manager.check_and_throttle()
-                # Removed sync_and_clear - let GPU work asynchronously
-
-            end_idx = min(i + batch_size, len(images_to_process))
-
-            # Concatenate images
-            batch_images = torch.cat(images_to_process[i:end_idx], dim=0).to(self.config.DEVICE, non_blocking=True)
-            if batch_images.ndim == 4:
-                try:
-                    batch_images = batch_images.to(memory_format=torch.channels_last)
-                except Exception:
-                    pass
-            batch_labels = torch.tensor(labels[i:end_idx]).to(self.config.DEVICE, non_blocking=True)
-
-            # Generate attributions with mixed precision for faster computation
-            if self.config.DEVICE == "cuda":
-                with torch.amp.autocast(self.config.DEVICE):
-                    heatmaps = method(model, batch_images, batch_labels)
-                    # Removed sync - let GPU pipeline work asynchronously
-                    # Only sync when absolutely necessary (e.g., before CPU operations)
-            else:
-                heatmaps = method(model, batch_images, batch_labels)
-
-            if heatmaps is not None:
-                # Save heatmaps and/or sorted indices based on config
-                for j, heatmap in enumerate(heatmaps):
-                    img_id = image_ids[i + j]
-                    heatmap_np = heatmap.cpu().numpy()
-
-                    # Save sorted pixel indices
-                    sorted_indices = sort_pixels(heatmap_np)
-                    sorted_path = self.file_manager.get_heatmap_path(
-                        dataset_name, model_name, method_name, img_id, sorted=True
-                    )
-                    np.save(sorted_path, sorted_indices)
-
-        # Clear GPU cache and check temperature after processing batch
-        self.gpu_manager.check_and_throttle()
-        self.gpu_manager.clear_cache_if_needed(threshold_percent=70.0)
-        # Removed sync_and_clear - let GPU work asynchronously, only clear cache if needed
-
+        """Run Phase 1: Generate heatmaps for all model-method-image combinations."""
+        self.phase1_runner.run(self._get_cached_model)
+    
     def run_phase_2(self):
-        """Evaluate heatmaps with occlusion."""
-
-        dataset_name = self.config.DATASET_NAME
-
-        # Validate dataset name
-        if dataset_name not in self.config.DATASET_CONFIG:
-            raise ValueError(
-                f"Dataset '{dataset_name}' not found in DATASET_CONFIG. "
-                f"Available datasets: {list(self.config.DATASET_CONFIG.keys())}"
-            )
-
-        completed_str = ""
-
-        try:
-            # Initialize progress tracker for fast resume
-            with ProgressTracker(
-                    self.file_manager,
-                    dataset_name,
-                    auto_save_interval=self.config.PROGRESS_AUTO_SAVE_INTERVAL,
-                    auto_save_time=self.config.PROGRESS_AUTO_SAVE_TIME
-            ) as progress:
-                completed_count = progress.get_completed_count()
-                if completed_count > 0:
-                    completed_str = f" | Resuming: {completed_count:,} done"
-
-                logging.info(f"Starting Phase 2 - Dataset: {dataset_name}{completed_str}")
-
-                # Load dataset and judging models
-                dataloader = get_dataloader(dataset_name, batch_size=1, shuffle=False)
-                image_label_map = {
-                    f"image_{i:05d}": (img, lbl.item())
-                    for i, (img, lbl) in enumerate(dataloader)
-                }
-
-                judging_models = {
-                    name: self._get_cached_model(name) for name in self.config.JUDGING_MODELS
-                }
-
-                # Convert PyTorch judging models to FP16 for faster inference if enabled
-                # Skip LLM judges (JudgingModel instances) as they don't support FP16
-                if self.config.USE_FP16_INFERENCE and self.config.DEVICE == "cuda" and self.gpu_manager.supports_fp16():
-                    for name, model in judging_models.items():
-                        # Only convert PyTorch models, not JudgingModel instances
-                        if isinstance(model, JudgingModel):
-                            logging.debug(f"Skipping FP16 conversion for judging model {name} (not a PyTorch model)")
-                            continue
-                        try:
-                            judging_models[name] = model.half()
-                            logging.debug(f"Converted {name} to FP16 for Phase 2 inference")
-                        except Exception as e:
-                            logging.warning(f"Failed to convert {name} to FP16, using FP32: {e}")
-
-                # Get heatmap files for this dataset
-                heatmap_dir = self.file_manager.get_heatmap_dir(dataset_name)
-                if not heatmap_dir.exists():
-                    logging.warning(f"No heatmaps found for {dataset_name}. Run Phase 1 first.")
-                    return
-
-                all_files = list(heatmap_dir.glob("*.npy"))
-                heatmap_files = [f for f in all_files if f.stem.endswith("_sorted")]
-
-                if not heatmap_files:
-                    logging.warning(f"No heatmaps found for {dataset_name}. Run Phase 1 first.")
-                    return
-
-                # Group heatmaps by generator and method for batch processing
-                heatmap_groups = self._group_heatmaps(heatmap_files)
-
-                # Process with progress bar
-                with tqdm(total=len(heatmap_groups), desc="Phase 2 Progress", unit="group", leave=True) as pbar:
-                    for i, (group_key, group_files) in enumerate(heatmap_groups.items(), 1):
-                        gen_model, method = group_key
-                        pbar.set_description(f"Phase 2 [{i}/{len(heatmap_groups)}] {gen_model[:20]}/{method[:20]}")
-                        try:
-                            self._evaluate_heatmap_batch(
-                                group_files, image_label_map, judging_models,
-                                progress, dataset_name, gen_model, method
-                            )
-                        except Exception as e:
-                            logging.error(f"Error processing {gen_model}-{method}: {e}")
-                        finally:
-                            pbar.update(1)
-
-                result_dir = self.file_manager.get_result_dir(dataset_name)
-                logging.info(f"Phase 2 complete! Results saved to: {result_dir}")
-        except Exception as e:
-            logging.error(f"Phase 2 failed: {e}")
-            raise
-
-    def _group_heatmaps(self, heatmap_files: List[Path]) -> Dict[Tuple[str, str], List[Path]]:
-        """Group heatmap files by generator model and method for batch processing."""
-        groups = {}
-        for heatmap_path in heatmap_files:
-            parts = heatmap_path.stem.split('-')
-            if len(parts) >= 3:
-                gen_model, method = parts[0], parts[1]
-                key = (gen_model, method)
-                if key not in groups:
-                    groups[key] = []
-                groups[key].append(heatmap_path)
-        return groups
-
-    def _evaluate_heatmap_batch(
-            self, heatmap_paths: List[Path], image_label_map,
-            judging_models, progress: ProgressTracker,
-            dataset_name: str, gen_model: str, method: str
-    ):
-        """Evaluate a batch of heatmaps (same generator and method) efficiently."""
-        # Prepare batch data once
-        batch_data = self._prepare_batch_data(heatmap_paths, image_label_map)
-        if not batch_data:
-            return
-
-            # Evaluate for each judge and strategy
-        for judge_name, judge_model in judging_models.items():
-            if judge_name == gen_model:
-                continue
-
-            # Only clear cache if memory usage is high before starting new judge model
-            _, current_usage = self.gpu_manager.get_memory_usage()
-            if current_usage > 80.0:
-                self.gpu_manager.clear_cache_if_needed(threshold_percent=80.0)
-                self.gpu_manager.sync_and_clear()
-
-            for strategy in self.config.FILL_STRATEGIES:
-                # Evaluate this specific combination
-                self._evaluate_strategy(
-                    batch_data, judge_model, judge_name, strategy,
-                    progress, dataset_name, gen_model, method
-                )
-
-    def _prepare_batch_data(
-            self, heatmap_paths: List[Path], image_label_map
-    ) -> List[Dict]:
-        """Prepare batch data from heatmap paths."""
-        batch_data = []
-        for heatmap_path in heatmap_paths:
-            try:
-                parts = heatmap_path.stem.split('-')
-                gen_model, method, img_id = parts[0], parts[1], '-'.join(parts[2:])
-
-                if img_id.endswith('_sorted'):
-                    img_id = img_id[:-len('_sorted')]
-
-                # Check if image exists in dataset
-                if img_id not in image_label_map:
-                    logging.warning(f"Image {img_id} not found in dataset, skipping heatmap {heatmap_path.name}")
-                    continue
-
-                original_image, true_label = image_label_map[img_id]
-
-                # Load cached sorted indices
-                sorted_pixel_indices = np.load(heatmap_path)
-                batch_data.append({
-                    'gen_model': gen_model,
-                    'method': method,
-                    'img_id': img_id,
-                    'image': original_image,
-                    'label': true_label,
-                    'sorted_indices': sorted_pixel_indices
-                })
-            except Exception as e:
-                logging.warning(f"Error loading {heatmap_path}: {e}")
-                continue
-
-        return batch_data
-
-    def _evaluate_strategy(
-            self, batch_data: List[Dict], judge_model, judge_name: str,
-            strategy: str, progress: ProgressTracker, dataset_name: str,
-            gen_model: str, method: str
-    ):
-        """Evaluate a specific judge/strategy combination for all images."""
-        from evaluation.occlusion import apply_occlusion_batch
-        from concurrent.futures import ThreadPoolExecutor
-
-        # Pre-allocation: Warm up GPU and prepare reusable buffers
-        # This reduces allocation overhead during processing
-        if self.config.DEVICE == "cuda" and batch_data:
-            try:
-                # Get image shape from first image to pre-allocate common buffers
-                sample_image = batch_data[0]['image'][0]
-                if sample_image.ndim >= 2:
-                    # Pre-allocate a small workspace tensor to warm up GPU memory allocator
-                    # This reduces first-batch allocation overhead
-                    _ = torch.zeros((1, *sample_image.shape), device=self.config.DEVICE,
-                                    dtype=torch.float16 if self.config.USE_FP16_INFERENCE else torch.float32)
-                    del _
-                    # Trigger a small dummy operation to initialize CUDA context
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass  # If pre-allocation fails, continue normally
-
-        # Results grouped by occlusion level
-        results_by_level = defaultdict(list)
-        total_skipped = 0
-        total_processed = 0
-
-        # Inner progress bar for occlusion levels (only if many levels)
-        show_inner = len(self.config.OCCLUSION_LEVELS) > 10
-        occlusion_levels = list(self.config.OCCLUSION_LEVELS)
-
-        # Helper function to prepare occlusion for a level
-        def prepare_occlusion_level(level):
-            """Prepare occlusion data for a specific level."""
-            images_to_process = []
-            sorted_indices_list = []
-            batch_labels = []
-            batch_info = []
-
-            for data in batch_data:
-                if progress.is_completed(
-                        data['gen_model'], data['method'], data['img_id'],
-                        judge_name, strategy, level
-                ):
-                    continue
-
-                images_to_process.append(data['image'][0])
-                sorted_indices_list.append(data['sorted_indices'])
-                batch_labels.append(data['label'])
-                batch_info.append(data)
-
-            if not images_to_process:
-                return None, None, None, None
-
-            return images_to_process, sorted_indices_list, batch_labels, batch_info
-
-        # pipelining: prepare data AND occlude multiple levels ahead
-        # This keeps GPU continuously busy - batches are ready when GPU finishes
-        PIPELINE_DEPTH = min(3, len(occlusion_levels))
-        with ThreadPoolExecutor(max_workers=PIPELINE_DEPTH + 2) as executor:
-            # Queue of occluded batches ready for GPU (already processed)
-            occluded_queue = {}  # {level_idx: (masked_images, batch_labels, batch_info)}
-            # Queue of data preparation futures
-            data_queue = []  # [(level_idx, future)]
-
-            # Helper to occlude a batch
-            def occlude_batch(level, data_tuple):
-                if data_tuple is None or data_tuple[0] is None:
-                    return None
-                images, sorted_indices, labels, info = data_tuple
-                try:
-                    masked = apply_occlusion_batch(images, sorted_indices, level, strategy)
-                    if self.config.DEVICE == "cuda":
-                        for i, img in enumerate(masked):
-                            if img.ndim == 4:
-                                try:
-                                    masked[i] = img.to(memory_format=torch.channels_last, non_blocking=True)
-                                except Exception:
-                                    pass
-                            if self.config.USE_FP16_INFERENCE and self.gpu_manager.supports_fp16():
-                                masked[i] = masked[i].half()
-                    return (masked, labels, info)
-                except Exception as e:
-                    logging.warning(f"Error occluding level {level}: {e}")
-                    return None
-
-            # Pre-prepare and pre-occlude first levels
-            for i in range(min(PIPELINE_DEPTH, len(occlusion_levels))):
-                level = occlusion_levels[i]
-                data_future = executor.submit(prepare_occlusion_level, level)
-                data_queue.append((i, data_future))
-
-            from concurrent.futures import Future
-
-            for idx, p_level in enumerate(tqdm(occlusion_levels,
-                                               desc=f"  → {judge_name[:8]}/{strategy[:6]}",
-                                               leave=False, disable=not show_inner)):
-                # Check occlusion futures that completed BEFORE trying to use them
-                for occlude_idx in list(occluded_queue.keys()):
-                    item = occluded_queue[occlude_idx]
-                    if isinstance(item, Future):
-                        if item.done():
-                            result = item.result()
-                            if result is not None:
-                                occluded_queue[occlude_idx] = result
-                            else:
-                                del occluded_queue[occlude_idx]
-
-                # Get occluded batch from queue if ready, otherwise process now
-                if idx in occluded_queue:
-                    item = occluded_queue.pop(idx)
-                    # Check if it's still a Future (shouldn't happen after check above, but safety check)
-                    if isinstance(item, Future):
-                        if item.done():
-                            result = item.result()
-                            if result is None:
-                                # Fallback to synchronous processing
-                                data = prepare_occlusion_level(p_level)
-                                if data[0] is None:
-                                    total_skipped += len(batch_data) if batch_data else 0
-                                    continue
-                                result = occlude_batch(p_level, data)
-                                if result is None:
-                                    continue
-                                masked_images, batch_labels, batch_info = result
-                                del data
-                            else:
-                                masked_images, batch_labels, batch_info = result
-                        else:
-
-                            # Future not done yet - process synchronously
-                            data = prepare_occlusion_level(p_level)
-                            if data[0] is None:
-                                total_skipped += len(batch_data) if batch_data else 0
-                                continue
-                            result = occlude_batch(p_level, data)
-                            if result is None:
-                                continue
-                            masked_images, batch_labels, batch_info = result
-                            del data
-                    else:
-                        # Already processed result tuple
-                        masked_images, batch_labels, batch_info = item
-                else:
-                    # Process synchronously (fallback)
-                    data = prepare_occlusion_level(p_level)
-                    if data[0] is None:
-                        total_skipped += len(batch_data) if batch_data else 0
-                        continue
-                    result = occlude_batch(p_level, data)
-                    if result is None:
-                        continue
-                    masked_images, batch_labels, batch_info = result
-                    del data
-
-                # Process completed data prep -> start occlusion in background
-                for data_idx, data_future in list(data_queue):
-                    if data_future.done():
-                        data_queue.remove((data_idx, data_future))
-                        if data_idx not in occluded_queue and data_idx > idx:
-                            level = occlusion_levels[data_idx]
-                            occlude_future = executor.submit(occlude_batch, level, data_future.result())
-                            # Store future - will check if done in next iteration
-                            occluded_queue[data_idx] = occlude_future
-
-                # Start preparing next levels to keep pipeline full
-                next_idx = idx + len(data_queue) + len([k for k in occluded_queue.keys() if k > idx]) + 1
-                while len(data_queue) < PIPELINE_DEPTH and next_idx < len(occlusion_levels):
-                    level = occlusion_levels[next_idx]
-                    data_future = executor.submit(prepare_occlusion_level, level)
-                    data_queue.append((next_idx, data_future))
-                    next_idx += 1
-
-                if not masked_images:
-                    continue
-
-                # Evaluate batch - GPU processes this while next batches are being prepared/occluded
-                predictions = self._evaluate_batch(masked_images, judge_model)
-                del masked_images
-
-                # Record results - batch progress updates to reduce I/O overhead
-                batch_progress_items = []
-                for pred_idx, (pred, info) in enumerate(zip(predictions, batch_info)):
-                    # Skip invalid predictions (failed evaluations)
-                    if pred is None or pred < 0:
-                        logging.error(f"Skipping invalid prediction for {info['img_id']} at level {p_level}")
-                        continue
-
-                    is_correct = 1 if pred == batch_labels[pred_idx] else 0
-                    results_by_level[p_level].append([
-                        info['img_id'], p_level, is_correct
-                    ])
-
-                    # Collect progress items for batch update (reduces I/O)
-                    batch_progress_items.append((
-                        info['gen_model'], info['method'], info['img_id'],
-                        judge_name, strategy, p_level
-                    ))
-                    total_processed += 1
-
-                # Batch update progress tracker (more efficient - single call instead of many)
-                if batch_progress_items:
-                    progress.mark_batch_completed(batch_progress_items)
-
-        # Save results to file
-        if results_by_level:
-            self._save_strategy_results(
-                results_by_level, dataset_name, gen_model,
-                judge_name, method, strategy
-            )
-            progress.save()  # Save progress after each strategy
-
-    def _evaluate_batch(
-            self, batch_images: List[torch.Tensor], judge_model
-    ) -> np.ndarray:
-        """Evaluate a batch of images with the judging model."""
-        try:
-            # Check memory and get safe batch size
-            # Only clear cache if memory usage is actually high (optimization)
-            _, current_usage = self.gpu_manager.get_memory_usage()
-            if current_usage >= 80.0:
-                self.gpu_manager.clear_cache_if_needed(threshold_percent=80.0)
-
-            # Use GPU manager to get optimal batch size
-            MAX_BATCH_SIZE = self.gpu_manager.get_optimal_inference_batch_size()
-
-            # Adjust batch size based on current memory usage (already checked above)
-            MAX_BATCH_SIZE = self.gpu_manager.get_safe_batch_size(MAX_BATCH_SIZE, current_usage)
-
-            # Check GPU temperature and throttle if needed
-            self.gpu_manager.check_and_throttle()
-            throttle_factor = getattr(self.gpu_manager, '_throttle_factor', 1.0)
-            MAX_BATCH_SIZE = int(MAX_BATCH_SIZE * throttle_factor)
-
-            # Aggressive multipliers for better VRAM utilization when GPU is underutilized
-            # With 0% GPU utilization, we can be very aggressive with batch sizes
-            max_cap = getattr(self.config, "INFERENCE_MAX_BATCH", 2048)  # Significantly increased for high-VRAM GPUs
-            if current_usage < 20.0:
-                # Very low usage - be very aggressive
-                MAX_BATCH_SIZE = min(int(MAX_BATCH_SIZE * 4.0), max_cap)
-            elif current_usage < 35.0:
-                MAX_BATCH_SIZE = min(int(MAX_BATCH_SIZE * 3.0), max_cap)  # Increased for better VRAM usage
-            elif current_usage < 50.0:
-                MAX_BATCH_SIZE = min(int(MAX_BATCH_SIZE * 2.5), max_cap)  # Increased for better VRAM usage
-            elif current_usage < 70.0:
-                MAX_BATCH_SIZE = min(int(MAX_BATCH_SIZE * 2.0), max_cap)  # Moderate increase
-
-            if len(batch_images) > MAX_BATCH_SIZE:
-                # Process in smaller chunks with minimal synchronization
-                # Process chunks continuously to keep GPU busy
-                all_predictions = []
-                num_chunks = (len(batch_images) + MAX_BATCH_SIZE - 1) // MAX_BATCH_SIZE
-
-                for i in range(0, len(batch_images), MAX_BATCH_SIZE):
-                    chunk = batch_images[i:i + MAX_BATCH_SIZE]
-                    # Process chunk - GPU works asynchronously, no sync needed
-                    chunk_predictions = self._evaluate_batch_chunk(chunk, judge_model)
-                    all_predictions.extend(chunk_predictions)
-
-                    # Explicitly delete chunk to free memory immediately
-                    # Don't sync - let GPU continue processing next operations
-                    del chunk
-
-                    # Reduced cache clearing frequency - only every 10 chunks or at end
-                    # This minimizes overhead and keeps GPU utilization high
-                    chunk_idx = i // MAX_BATCH_SIZE
-                    if (chunk_idx > 0 and chunk_idx % 10 == 0) or (chunk_idx == num_chunks - 1):
-                        # Check memory usage before clearing - non-blocking check
-                        _, current_usage = self.gpu_manager.get_memory_usage()
-                        if current_usage > 85.0:  # Only clear if usage is high
-                            self.gpu_manager.clear_cache_if_needed(threshold_percent=85.0)
-                        # Check temperature (non-blocking, uses cached value if recent)
-                        self.gpu_manager.check_and_throttle()
-                        # No sync - GPU continues working asynchronously
-
-                return np.array(all_predictions)
-            else:
-                return self._evaluate_batch_chunk(batch_images, judge_model)
-
-        except Exception as e:
-            logging.warning(f"Batch evaluation error: {e}, falling back to single")
-            # Fallback to single evaluation
-            predictions = []
-            for img in batch_images:
-                try:
-                    # Check if judge_model is a JudgingModel instance
-                    if isinstance(judge_model, JudgingModel):
-                        # Use JudgingModel.predict() interface
-                        pred = judge_model.predict([img])[0]
-                        predictions.append(pred)
-                    else:
-                        # PyTorch model fallback
-                        single_tensor = img.unsqueeze(0).to(self.config.DEVICE)
-                        with torch.inference_mode():  # Faster than no_grad
-                            if self.config.DEVICE == "cuda":
-                                with torch.amp.autocast(self.config.DEVICE, dtype=torch.float16):
-                                    outputs = judge_model(single_tensor)
-                            else:
-                                outputs = judge_model(single_tensor)
-
-                            if isinstance(outputs, tuple):
-                                outputs = outputs[0]
-                            if isinstance(outputs, dict):
-                                outputs = outputs['logits']
-                            pred = torch.argmax(outputs, dim=1).item()
-                        predictions.append(pred)
-                except Exception as e2:
-                    logging.warning(f"Single evaluation failed: {e2}")
-                    predictions.append(-1)  # Invalid prediction marker
-            return np.array(predictions, dtype=object)
-
-    def _evaluate_batch_chunk(
-            self, batch_images: List[torch.Tensor], judge_model
-    ) -> np.ndarray:
-        """Evaluate a chunk of images (actual batch processing)."""
-        # Check if judge_model is a JudgingModel instance (LLM judge)
-        if isinstance(judge_model, JudgingModel):
-            # Use JudgingModel.predict() interface
-            try:
-                predictions = judge_model.predict(batch_images)
-                return predictions
-            except Exception as e:
-                logging.error(f"Error evaluating with JudgingModel: {e}")
-                # Return invalid predictions
-                return np.array([-1] * len(batch_images), dtype=np.int64)
-        
-        # Otherwise, treat as PyTorch model (existing behavior)
-        try:
-            # Use non-blocking transfer for better GPU utilization
-            # Stack on GPU directly if all images are already on GPU, otherwise use non_blocking
-            if self.config.DEVICE == "cuda":
-                # Check if images are already on GPU
-                if all(img.device.type == "cuda" for img in batch_images):
-                    # Stack directly on GPU - faster
-                    batch_tensor = torch.stack(batch_images)
-                else:
-                    # Transfer with non-blocking for better pipelining
-                    batch_tensor = torch.stack(batch_images).to(self.config.DEVICE, non_blocking=True)
-            else:
-                batch_tensor = torch.stack(batch_images).to(self.config.DEVICE)
-
-            if batch_tensor.ndim == 4:
-                try:
-                    # Use non_blocking for memory format conversion to overlap with GPU work
-                    batch_tensor = batch_tensor.to(memory_format=torch.channels_last, non_blocking=True)
-                except Exception:
-                    pass
-
-            # Use inference_mode for better performance than no_grad
-            with torch.inference_mode():
-                # Use FP16 for faster inference if enabled
-                if self.config.DEVICE == "cuda" and self.config.USE_FP16_INFERENCE:
-                    with torch.amp.autocast(self.config.DEVICE, dtype=torch.float16):
-                        outputs = judge_model(batch_tensor)
-                elif self.config.DEVICE == "cuda":
-                    # Still use autocast but with default precision
-                    with torch.amp.autocast(self.config.DEVICE):
-                        outputs = judge_model(batch_tensor)
-                else:
-                    outputs = judge_model(batch_tensor)
-
-                if isinstance(outputs, tuple):
-                    outputs = outputs[0]
-                if isinstance(outputs, dict):
-                    outputs = outputs['logits']
-                # Only sync when we need to transfer results to CPU
-                # Note: cpu() and numpy() will sync, but we delay it until here
-                predictions_tensor = torch.argmax(outputs, dim=1)
-                # Transfer to CPU - sync happens here, but we've done all GPU work first
-                predictions = predictions_tensor.cpu().numpy()
-
-            # Clean up batch tensor immediately
-            del batch_tensor
-
-            return predictions
-        except RuntimeError as e:
-            # Handle CUDA out of memory errors
-            if "out of memory" in str(e).lower():
-                logging.error(f"CUDA OOM error with batch size {len(batch_images)}")
-                logging.error(f"Clearing cache and retrying with smaller batches...")
-
-                # Emergency cache clear
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
-
-                # Retry with smaller batch size (divide by 2)
-                if len(batch_images) > 1:
-                    mid = len(batch_images) // 2
-                    logging.info(f"Splitting batch into {mid} + {len(batch_images) - mid}")
-                    pred1 = self._evaluate_batch_chunk(batch_images[:mid], judge_model)
-                    pred2 = self._evaluate_batch_chunk(batch_images[mid:], judge_model)
-                    return np.concatenate([pred1, pred2])
-                else:
-                    # Single image failed - this is serious
-                    logging.error("Failed to evaluate even a single image!")
-                    raise e
-            else:
-                raise e
-        except Exception as e:
-            raise e
-
-    def _save_strategy_results(
-            self, results_by_level: Dict, dataset_name: str,
-            gen_model: str, judge_model: str, method: str, strategy: str
-    ):
-        """Save results for a specific strategy to CSV file."""
-        # Get file path
-        result_file = self.file_manager.get_result_file_path(
-            dataset_name, gen_model, judge_model, method, strategy
-        )
-
-        # Flatten results
-        all_results = []
-        for level in sorted(results_by_level.keys()):
-            all_results.extend(results_by_level[level])
-
-        # Save to CSV (append mode if file exists)
-        header = ["image_id", "occlusion_level", "is_correct"]
-        self.file_manager.save_csv(
-            result_file, all_results, header=header, append=result_file.exists()
-        )
-
+        """Run Phase 2: Evaluate heatmaps with occlusion."""
+        self.phase2_runner.run(self._get_cached_model)
+    
     def run_phase_3(self):
-        """
-        Run analysis and visualization.
-        """
-
-        try:
-            import pandas as pd
-
-            # Check if results directory exists
-            if not self.file_manager.results_dir.exists():
-                logging.error(f"Results directory does not exist: {self.file_manager.results_dir}")
-                return
-
-            # Find all datasets with results
-            datasets = [
-                d.name for d in self.file_manager.results_dir.iterdir()
-                if d.is_dir() and not d.name.startswith('.')
-            ]
-
-            if not datasets:
-                logging.error("No result datasets found")
-                return
-
-            logging.info(f"Starting Phase 3 - Analyzing: {', '.join(datasets)}")
-
-            # Load all results from file structure
-            all_data = []
-            for dataset in datasets:
-                result_files = self.file_manager.scan_result_files(dataset)
-
-                for result_file in result_files:
-                    # Parse file path to get parameters
-                    params = self.file_manager.parse_result_file_path(result_file, dataset)
-                    if not params:
-                        continue
-
-                    # Load CSV data
-                    rows = self.file_manager.load_csv(result_file, skip_header=True)
-
-                    # Add metadata to each row
-                    for row in rows:
-                        if len(row) >= 3:
-                            try:
-                                all_data.append({
-                                    'dataset': dataset,
-                                    'generating_model': params['gen_model'],
-                                    'attribution_method': params['method'],
-                                    'judging_model': params['judge_model'],
-                                    'fill_strategy': params['strategy'],
-                                    'image_id': row[0],
-                                    'occlusion_level': float(row[1]),
-                                    'is_correct': int(row[2])
-                                })
-                            except (ValueError, TypeError) as e:
-                                logging.warning(f"Skipping corrupted row in {result_file}: {row} - {e}")
-                                continue
-
-            if not all_data:
-                logging.warning("No results data found")
-                return
-
-            # Create DataFrame
-            df = pd.DataFrame(all_data)
-
-            # Calculate aggregated accuracy
-            group_cols = [
-                "dataset", "generating_model", "attribution_method",
-                "judging_model", "fill_strategy", "occlusion_level"
-            ]
-            agg_df = df.groupby(group_cols)['is_correct'].mean().reset_index()
-            agg_df.rename(columns={'is_correct': 'mean_accuracy'}, inplace=True)
-
-            # Calculate metrics
-            metrics_list = []
-            curve_group_cols = [
-                "dataset", "generating_model", "attribution_method",
-                "judging_model", "fill_strategy"
-            ]
-
-            for name, curve_df in agg_df.groupby(curve_group_cols):
-                try:
-                    dataset, gen_model, method, judge_model, fill_strat = name
-
-                    baseline_acc = 1.0
-                    if 0 in curve_df['occlusion_level'].values:
-                        baseline_acc = curve_df[curve_df['occlusion_level'] == 0]['mean_accuracy'].iloc[0]
-
-                    accuracies = curve_df['mean_accuracy'].tolist()
-                    levels = curve_df['occlusion_level'].tolist()
-
-                    auc = calculate_auc(accuracies, levels)
-                    drop75 = calculate_drop(accuracies, levels, initial_accuracy=baseline_acc, drop_level=75)
-
-                    metrics_list.append({
-                        "dataset": dataset,
-                        "generating_model": gen_model,
-                        "attribution_method": method,
-                        "judging_model": judge_model,
-                        "fill_strategy": fill_strat,
-                        "auc": auc,
-                        "drop_at_75": drop75
-                    })
-                except Exception as e:
-                    logging.warning(f"Error calculating metrics for {name}: {e}")
-                    continue
-
-            # Save results
-            metrics_df = pd.DataFrame(metrics_list)
-            agg_output_path = self.file_manager.analysis_dir / "aggregated_accuracy_curves.csv"
-            metrics_output_path = self.file_manager.analysis_dir / "faithfulness_metrics.csv"
-
-            agg_df.to_csv(agg_output_path, index=False)
-            metrics_df.to_csv(metrics_output_path, index=False)
-
-            # Generate plots per dataset
-            for dataset in datasets:
-                dataset_df = agg_df[agg_df['dataset'] == dataset].copy()
-                if not dataset_df.empty:
-                    # Create dataset-specific output directory
-                    dataset_analysis_dir = self.file_manager.analysis_dir / dataset
-                    self.file_manager.ensure_dir_exists(dataset_analysis_dir)
-
-                    plot_accuracy_degradation_curves(
-                        dataset_df, output_dir=dataset_analysis_dir
-                    )
-                    plot_fill_strategy_comparison(
-                        dataset_df, output_dir=dataset_analysis_dir
-                    )
-
-            logging.info(f"Phase 3 complete! Results → {self.file_manager.analysis_dir}")
-        except Exception as e:
-            logging.error(f"Phase 3 failed: {e}")
-            raise
+        """Run Phase 3: Calculate metrics and generate visualizations."""
+        self.phase3_runner.run()

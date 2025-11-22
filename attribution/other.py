@@ -15,7 +15,7 @@ class GuidedBackpropMethod(AttributionMethod):
     """Guided Backpropagation attribution."""
     
     def __init__(self):
-        super().__init__("guided_backprop", "batch", 16)
+        super().__init__("guided_backprop")
         
     def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute Guided Backpropagation attribution."""
@@ -28,7 +28,7 @@ class RandomBaselineMethod(AttributionMethod):
     """Random baseline attribution."""
     
     def __init__(self):
-        super().__init__("random_baseline", "batch", 32)
+        super().__init__("random_baseline")
         
     def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute random baseline attribution."""

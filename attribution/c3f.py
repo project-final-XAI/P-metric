@@ -42,7 +42,7 @@ class C3FMethod(AttributionMethod):
     OCCL_BASELINE_MODE = "zeros"  # "zeros" or "imagenet_mean"
     
     def __init__(self):
-        super().__init__("c3f", "single", 1)
+        super().__init__("c3f")
         self._attributors = {}  # Cache attributors per model
         
     def _init_attributors(self, model):

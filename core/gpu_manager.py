@@ -1,42 +1,75 @@
 """
 GPU resource management and batch size optimization.
 
-Automatically detects GPU capabilities and adjusts batch sizes
-for each attribution method accordingly.
+Automatically detects GPU capabilities and adjusts batch sizes for each attribution method.
 Includes thermal monitoring and throttling to prevent crashes.
 """
 
 import torch
 import time
 import subprocess
+import logging
 from typing import Dict, Optional
+
+from core.gpu_utils import get_memory_usage, clear_cache_if_needed, sync_and_clear
 
 
 class GPUManager:
-    """Manages GPU resources and optimizes batch sizes."""
-
+    """
+    Manages GPU resources and optimizes batch sizes.
+    
+    Provides methods for:
+    - GPU capability detection
+    - Batch size calculation based on GPU memory
+    - Thermal monitoring and throttling
+    - Memory management
+    """
+    
     def __init__(self):
+        """Initialize GPU manager with device detection and batch size calculation."""
         self.device = self._detect_device()
         self.gpu_memory_gb = self._get_gpu_memory()
         self.batch_sizes = self._calculate_optimal_batches()
+        
+        # Thermal monitoring state
         self._last_temp_check = 0.0
-        self._temp_check_interval = 20.0  # Check temperature every 20 seconds
+        self._temp_check_interval = 40.0  # Check temperature every X seconds
         self._last_temp = None
-        self._throttle_factor = 1.0  # Multiplier for batch sizes (1.0 = no throttling)
-
-    # ------------------------------
-    # Device / memory helpers
-    # ------------------------------
+        self._throttle_factor = 1.2  # Multiplier for batch sizes (1.0 = no throttling)
+    
+    # ------------------------------ Device Detection ------------------------------
+    
     def _detect_device(self) -> str:
-        """Detect optimal device: CUDA vs CPU."""
+        """
+        Detect optimal device: CUDA vs CPU.
+        
+        Returns:
+            'cuda' if CUDA is available, 'cpu' otherwise
+        """
         if torch.cuda.is_available():
             return "cuda"
         return "cpu"
-
+    
+    def _get_gpu_memory(self) -> float:
+        """
+        Get available GPU memory in GB.
+        
+        Returns:
+            GPU memory in GB, or 0.0 if CUDA is not available
+        """
+        if not torch.cuda.is_available():
+            return 0.0
+        return torch.cuda.get_device_properties(0).total_memory / 1e9
+    
     def supports_fp16(self) -> bool:
         """
         Check if the current GPU architecture supports fast FP16 math.
-        Volta (7.0) and above have native FP16; modern RTX GPUs are supported
+        
+        Volta (compute capability 7.0) and above have native FP16 support.
+        Modern RTX GPUs (Turing, Ampere, Ada) are supported.
+        
+        Returns:
+            True if GPU supports FP16, False otherwise
         """
         if not torch.cuda.is_available():
             return False
@@ -46,119 +79,144 @@ class GPUManager:
         except Exception:
             # Conservative default: assume supported on modern setups
             return True
-
-    def _get_gpu_memory(self) -> float:
-        """Get available GPU memory in GB."""
-        if not torch.cuda.is_available():
-            return 0.0
-        return torch.cuda.get_device_properties(0).total_memory / 1e9
-
+    
+    # ------------------------------ Batch Size Calculation ------------------------------
+    
     def _calculate_optimal_batches(self) -> Dict[str, int]:
-        """Calculate optimal batch size for each attribution method."""
-        # Optimized batch sizes for better VRAM utilization
-        # RTX 5090 with 25.7GB can handle larger batches
+        """
+        Calculate optimal batch size for each attribution method.
+        
+        Batch sizes are scaled based on GPU memory:
+        - High-VRAM GPUs (24GB+): 2x base sizes
+        - Mid-VRAM GPUs (16-24GB): 1.5x base sizes
+        - Standard GPUs (8-16GB): base sizes
+        - Low-VRAM GPUs (<8GB): 0.5x base sizes
+        
+        Returns:
+            Dictionary mapping method names to batch sizes
+        """
+        # Base batch sizes for each attribution method
+        # These are conservative defaults that work on most GPUs
         base_sizes = {
             "saliency": 32,
-            "inputxgradient": 64,  # Increased for better VRAM usage
-            "smoothgrad": 24,  # Increased for better VRAM usage
-            "guided_backprop": 64,  # Increased for better VRAM usage
-            "integrated_gradients": 16,  # Increased for better VRAM usage
-            "gradientshap": 8,  # Increased for better VRAM usage
-            "occlusion": 24,  # Increased for better VRAM usage
-            "xrai": 8,  # Increased for better VRAM utilization - can handle batches now
-            "grad_cam": 32,  # Increased for better VRAM usage
-            "guided_gradcam": 32,  # Increased for better VRAM usage
-            "random_baseline": 128,  # Increased for better VRAM usage
-            "c3f": 2,  # Keep small - very memory intensive
+            "inputxgradient": 64,
+            "smoothgrad": 24,
+            "guided_backprop": 64,
+            "integrated_gradients": 16,
+            "gradientshap": 8,
+            "occlusion": 24,
+            "xrai": 8,
+            "grad_cam": 32,
+            "guided_gradcam": 32,
+            "random_baseline": 128,
+            "c3f": 1,  # Must be 1 - C3F processes one image at a time
         }
-
-        # More aggressive scaling for high-VRAM GPUs (RTX 5090)
+        
+        # Scale based on GPU memory, but keep batch_size=1 methods unchanged
+        # Methods like C3F require batch_size=1 and should not be scaled
         if self.gpu_memory_gb >= 24:
-            # RTX 5090 can handle 2x-2.5x base sizes safely
-            return {k: int(v * 2.0) for k, v in base_sizes.items()}
+            # High-VRAM GPUs can handle 2x base sizes
+            return {k: (v if v == 1 else int(v * 2.0)) for k, v in base_sizes.items()}
         elif self.gpu_memory_gb > 16:
-            return {k: int(v * 1.5) for k, v in base_sizes.items()}
+            # Mid-VRAM GPUs can handle 1.5x base sizes
+            return {k: (v if v == 1 else int(v * 1.5)) for k, v in base_sizes.items()}
         elif self.gpu_memory_gb > 8:
+            # Standard GPUs use base sizes
             return base_sizes
         else:
+            # Low-VRAM GPUs use half base sizes
             return {k: max(1, v // 2) for k, v in base_sizes.items()}
-
+    
     def get_batch_size(self, method: str) -> int:
-        """Get optimal batch size for specific method."""
+        """
+        Get optimal batch size for specific attribution method.
+        
+        Args:
+            method: Name of the attribution method
+            
+        Returns:
+            Optimal batch size for the method
+        """
         return self.batch_sizes.get(method, 1)
-
-    def get_strategy(self, method: str) -> str:
-        """Get processing strategy for method."""
-        if method in ["integrated_gradients", "gradientshap", "xrai"]:
-            return "micro"  # XRAI now supports micro-batching
-        elif method in ["c3f"]:
-            return "single"
-        else:
-            return "batch"
-
-    # ------------------------------
-    # Backwards-compat utility methods
-    # ------------------------------
+    
+    # ------------------------------ Memory Management ------------------------------
+    
     def get_memory_usage(self):
         """
-        Return (total_gb, usage_percent) for CUDA device 0.
-        Falls back to (0.0, 0.0) on CPU.
+        Get current GPU memory usage.
+        
+        Returns:
+            Tuple of (total_gb, usage_percent). Returns (0.0, 0.0) on CPU.
         """
-        if not torch.cuda.is_available():
-            return 0.0, 0.0
-        total_bytes = torch.cuda.get_device_properties(0).total_memory
-        allocated = torch.cuda.memory_allocated(0)
-        usage = (allocated / total_bytes) * 100.0 if total_bytes > 0 else 0.0
-        return total_bytes / 1e9, usage
-
+        return get_memory_usage() # Returns from gpu_utils.py
+    
     def clear_cache_if_needed(self, threshold_percent: float = 75.0) -> None:
         """
-        If current CUDA memory usage exceeds threshold, clear CUDA cache.
-        No-op on CPU.
+        Clear CUDA cache if memory usage exceeds threshold.
+        
+        Args:
+            threshold_percent: Memory usage threshold (0-100) to trigger cache clear
         """
-        if not torch.cuda.is_available():
-            return
-        _, usage = self.get_memory_usage()
-        if usage >= threshold_percent:
-            torch.cuda.empty_cache()
-            try:
-                torch.cuda.synchronize()
-            except Exception:
-                pass
-
+        clear_cache_if_needed(threshold_percent) # Returns from gpu_utils.py
+    
+    def sync_and_clear(self) -> None:
+        """Synchronize GPU operations and clear cache."""
+        sync_and_clear()
+    
     def get_optimal_inference_batch_size(self) -> int:
         """
-        Provide a coarse default inference batch size based on GPU memory.
-        Optimized for better VRAM utilization on high-memory GPUs.
-        Aggressively increased for GPUs with 23.5GB+ VRAM to maximize utilization.
+        Get optimal inference batch size based on GPU memory.
+        
+        This is used for Phase 2 evaluation where we process many occluded images.
+        Batch sizes are aggressively increased for high-VRAM GPUs to maximize utilization.
+        
+        Returns:
+            Optimal batch size (adjusted for thermal throttling)
         """
-        # Apply throttle factor for thermal management
-        base_size = 64
-        if self.gpu_memory_gb >= 23:
-            # RTX 3050/5090 with 23.5GB+ can handle much larger batches
-            # With 0% GPU utilization, we can be very aggressive
-            base_size = 768  # Significantly increased for better VRAM utilization
+        # Base batch sizes by GPU memory
+        if self.gpu_memory_gb >= 22:
+            # Very high-VRAM GPUs can handle large batches
+            base_size = 768
         elif self.gpu_memory_gb >= 16:
-            base_size = 512  # Increased for high-VRAM GPUs
+            # High-VRAM GPUs
+            base_size = 512
         elif self.gpu_memory_gb > 8:
-            base_size = 256  # Increased for mid-range GPUs
+            # Mid-range GPUs
+            base_size = 256
         else:
+            # Low-VRAM GPUs
             base_size = 64
         
+        # Apply thermal throttling factor
         return int(base_size * self._throttle_factor)
-
+    
     def get_safe_batch_size(self, desired: int, current_usage_percent: float) -> int:
         """
-        Adjust desired batch size based on current usage. Simple heuristic.
+        Adjust desired batch size based on current GPU memory usage.
+        
+        Args:
+            desired: Desired batch size
+            current_usage_percent: Current GPU memory usage percentage (0-100)
+            
+        Returns:
+            Safe batch size (at least 1)
         """
         if current_usage_percent < 85.0:
             return max(1, desired)
-        if current_usage_percent < 92.0:
+        elif current_usage_percent < 92.0:
             return max(1, desired // 2)
-        return max(1, desired // 4)
-
+        else:
+            return max(1, desired // 4)
+    
+    # ------------------------------ Thermal Management ------------------------------
+    
     def get_gpu_temperature(self) -> Optional[float]:
-        """Get current GPU temperature in Celsius using nvidia-smi."""
+        """
+        Get current GPU temperature in Celsius using nvidia-smi.
+        
+        Returns:
+            GPU temperature in Celsius, or None if unavailable
+        """
         if not torch.cuda.is_available():
             return None
         
@@ -176,13 +234,22 @@ class GPUManager:
         except Exception:
             pass
         return None
-
+    
     def check_and_throttle(self) -> None:
         """
         Check GPU temperature and adjust throttle factor if needed.
+        
+        Thermal throttling thresholds:
+        - >= 87°C: Critical - throttle to 30% capacity
+        - >= 83°C: High - throttle to 50% capacity
+        - >= 78°C: Moderate - throttle to 70% capacity
+        - < 75°C: Normal - gradually restore full capacity
+        
         Should be called periodically during long-running operations.
         """
         current_time = time.time()
+        
+        # Only check temperature every N seconds to avoid overhead
         if current_time - self._last_temp_check < self._temp_check_interval:
             return
         
@@ -194,16 +261,14 @@ class GPUManager:
         
         self._last_temp = temp
         
-        # Thermal throttling thresholds
+        # Apply thermal throttling based on temperature
         if temp >= 87:
             # Critical: reduce workload significantly
             self._throttle_factor = 0.3
-            import logging
             logging.warning(f"GPU temperature critical: {temp}°C - throttling to 30% capacity")
         elif temp >= 83:
             # High: reduce workload moderately
             self._throttle_factor = 0.5
-            import logging
             logging.warning(f"GPU temperature high: {temp}°C - throttling to 50% capacity")
         elif temp >= 78:
             # Moderate: slight reduction
@@ -212,20 +277,11 @@ class GPUManager:
             # Normal: restore full capacity gradually
             if self._throttle_factor < 1.0:
                 self._throttle_factor = min(1.0, self._throttle_factor + 0.1)
-
-    def sync_and_clear(self) -> None:
-        """Synchronize GPU operations and clear cache. Helps prevent crashes."""
-        if not torch.cuda.is_available():
-            return
-        try:
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-        except Exception:
-            pass
-
+    
+    # ------------------------------ Information ------------------------------
+    
     def print_info(self):
-        """Print GPU information."""
-        import logging
+        """Print GPU information for debugging."""
         logging.info(f"Device: {self.device}")
         if self.device == "cuda":
             logging.info(f"GPU Memory: {self.gpu_memory_gb:.1f}GB")

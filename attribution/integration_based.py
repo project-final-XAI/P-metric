@@ -15,7 +15,7 @@ class IntegratedGradientsMethod(AttributionMethod):
     """Integrated Gradients attribution."""
     
     def __init__(self):
-        super().__init__("integrated_gradients", "micro", 16)
+        super().__init__("integrated_gradients")
         
     def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute Integrated Gradients attribution."""
@@ -34,7 +34,7 @@ class GradientSHAPMethod(AttributionMethod):
     """GradientSHAP attribution."""
     
     def __init__(self):
-        super().__init__("gradientshap", "micro", 8)
+        super().__init__("gradientshap")
         
     def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute GradientSHAP attribution."""

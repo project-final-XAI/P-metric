@@ -68,7 +68,7 @@ def test_attribution_methods():
         
         # Test getting a specific method
         saliency = get_attribution_method("saliency")
-        print(f"✅ Saliency: {saliency.name}, strategy: {saliency.strategy}")
+        print(f"✅ Saliency: {saliency.name}")
         
         return True
     except Exception as e:

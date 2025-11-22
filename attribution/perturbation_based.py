@@ -16,7 +16,7 @@ class OcclusionMethod(AttributionMethod):
     """Occlusion attribution."""
     
     def __init__(self):
-        super().__init__("occlusion", "batch", 8)
+        super().__init__("occlusion")
         
     def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute Occlusion attribution."""
@@ -40,7 +40,7 @@ class XRAIMethod(AttributionMethod):
     """XRAI attribution using Integrated Gradients with segmentation."""
     
     def __init__(self):
-        super().__init__("xrai", "micro", 4)  # Changed to micro-batch for better VRAM utilization
+        super().__init__("xrai")
         
     def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """

@@ -17,7 +17,7 @@ class SaliencyMethod(AttributionMethod):
     """Saliency attribution using vanilla gradients."""
     
     def __init__(self):
-        super().__init__("saliency", "batch", 16)
+        super().__init__("saliency")
         
     def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute saliency attribution."""
@@ -30,7 +30,7 @@ class InputXGradientMethod(AttributionMethod):
     """Input × Gradient attribution."""
     
     def __init__(self):
-        super().__init__("inputxgradient", "batch", 16)
+        super().__init__("inputxgradient")
         
     def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute Input × Gradient attribution."""
@@ -43,7 +43,7 @@ class SmoothGradMethod(AttributionMethod):
     """SmoothGrad attribution using noisy gradients."""
     
     def __init__(self):
-        super().__init__("smoothgrad", "batch", 8)
+        super().__init__("smoothgrad")
         
     def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute SmoothGrad attribution."""

@@ -40,13 +40,3 @@ def get_attribution_method(name: str):
 def get_all_methods():
     """Get all available method names."""
     return list(METHOD_REGISTRY.keys())
-
-
-def get_method_info(name: str):
-    """Get method configuration info."""
-    method = get_attribution_method(name)
-    return {
-        "name": method.name,
-        "strategy": method.strategy,
-        "max_batch_size": method.max_batch_size
-    }

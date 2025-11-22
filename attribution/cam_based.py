@@ -16,7 +16,7 @@ class GradCAMMethod(AttributionMethod):
     """GradCAM attribution."""
     
     def __init__(self):
-        super().__init__("grad_cam", "batch", 8)
+        super().__init__("grad_cam")
         
     def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute GradCAM attribution."""
@@ -33,7 +33,7 @@ class GuidedGradCAMMethod(AttributionMethod):
     """Guided GradCAM attribution."""
     
     def __init__(self):
-        super().__init__("guided_gradcam", "batch", 8)
+        super().__init__("guided_gradcam")
         
     def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute Guided GradCAM attribution."""

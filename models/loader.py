@@ -37,7 +37,6 @@ def load_model(model_name: str) -> nn.Module:
             try:
                 checkpoint = torch.load(local_model_path, map_location=DEVICE, weights_only=False)
                 model = checkpoint['model']
-                # logging.info(f"Loaded {model_name} from local file")
             except Exception as e1:
                 raise ValueError(f"Failed to load local model '{local_model_path}': {e1}")
         else:
@@ -46,12 +45,10 @@ def load_model(model_name: str) -> nn.Module:
         try:
             # Try torchvision first
             model = models.get_model(model_name, weights="IMAGENET1K_V1")
-            # logging.info(f"Loaded {model_name} from torchvision")
         except Exception:
             try:
                 # Try timm for ViT, Swin-T, etc.
                 model = timm.create_model(model_name, pretrained=True)
-                # logging.info(f"Loaded {model_name} from timm")
             except Exception as e2:
                 raise ValueError(f"Model '{model_name}' not found in torchvision, timm, or local models folder: {e2}")
 
@@ -71,7 +68,7 @@ def load_model(model_name: str) -> nn.Module:
     for param in model.parameters():
         param.requires_grad = True
 
-    # Always use eager mode for maximum compatibility
-    logging.debug(f"Using eager mode for {model_name} (torch.compile disabled)")
+    # Model is ready for evaluation
+    # Note: torch.compile is disabled for maximum compatibility
 
     return model

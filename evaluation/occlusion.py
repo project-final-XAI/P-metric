@@ -1,7 +1,8 @@
 """
 Occlusion-based evaluation utilities.
 
-Handles progressive pixel occlusion and fill strategies.
+Handles progressive pixel occlusion and fill strategies for evaluating
+attribution heatmaps by measuring model accuracy degradation.
 """
 
 import numpy as np
@@ -12,26 +13,48 @@ from torchvision import transforms
 from config import DEVICE
 
 
+# -----------------
 # Fill Strategy Implementations
+# -----------------
 
 # Cache blur transform to avoid repeated creation (performance optimization)
 _BLUR_TRANSFORM_CACHE = None
-# Cache random noise tensor to avoid repeated generation (much faster!)
+
+# Cache random noise tensor to avoid repeated generation (performance optimization)
 _RANDOM_NOISE_CACHE = None
 
+
 def _get_blur_transform():
-    """Get or create cached blur transform."""
+    """
+    Get or create cached blur transform.
+    
+    Returns:
+        GaussianBlur transform instance
+    """
     global _BLUR_TRANSFORM_CACHE
     if _BLUR_TRANSFORM_CACHE is None:
         _BLUR_TRANSFORM_CACHE = transforms.GaussianBlur(kernel_size=21, sigma=10)
     return _BLUR_TRANSFORM_CACHE
 
-def _get_random_noise(shape, device):
-    """Get or create cached random noise tensor."""
+
+def _get_random_noise(shape: Tuple[int, ...], device: torch.device) -> torch.Tensor:
+    """
+    Get or create cached random noise tensor.
+    
+    Args:
+        shape: Shape of the noise tensor
+        device: Device to create tensor on
+        
+    Returns:
+        Random noise tensor
+    """
     global _RANDOM_NOISE_CACHE
-    if _RANDOM_NOISE_CACHE is None or _RANDOM_NOISE_CACHE.shape != shape or _RANDOM_NOISE_CACHE.device != device:
+    if (_RANDOM_NOISE_CACHE is None or 
+        _RANDOM_NOISE_CACHE.shape != shape or 
+        _RANDOM_NOISE_CACHE.device != device):
         _RANDOM_NOISE_CACHE = torch.rand(shape, device=device)
     return _RANDOM_NOISE_CACHE
+
 
 def _fill_gray(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """Fill masked area with solid gray color."""
@@ -43,14 +66,14 @@ def _fill_gray(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 def _fill_blur(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """Fill masked area with blurred version of image."""
     occluded_image = image.clone()
-    blur_transform = _get_blur_transform()  # Use cached transform
+    blur_transform = _get_blur_transform()
     blurred_image = blur_transform(image)
     occluded_image[:, mask] = blurred_image[:, mask]
     return occluded_image
 
 
 def _fill_random_noise(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Fill masked area with cached random noise (faster than generating each time)."""
+    """Fill masked area with cached random noise."""
     occluded_image = image.clone()
     noise = _get_random_noise(image.shape, image.device)
     occluded_image[:, mask] = noise[:, mask]
@@ -58,12 +81,22 @@ def _fill_random_noise(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 
 
 def _fill_solid_color(image: torch.Tensor, mask: torch.Tensor, color) -> torch.Tensor:
-    """Fill masked area with solid color (can be single value or per-channel tuple)."""
+    """
+    Fill masked area with solid color.
+    
+    Args:
+        image: Image tensor (C, H, W)
+        mask: Boolean mask tensor (H, W)
+        color: Color value(s) - can be single value or per-channel tuple
+        
+    Returns:
+        Occluded image tensor
+    """
     occluded_image = image.clone()
     
     # Handle per-channel colors (for normalized images)
     if isinstance(color, (tuple, list)):
-        # color is (R, G, B) values for each channel
+        # Color is (R, G, B) values for each channel
         for c in range(3):
             occluded_image[c, mask] = color[c]
     else:
@@ -74,7 +107,7 @@ def _fill_solid_color(image: torch.Tensor, mask: torch.Tensor, color) -> torch.T
 
 
 def _fill_mean_color(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Fill masked area with mean color."""
+    """Fill masked area with mean color of the image."""
     occluded_image = image.clone()
     occluded_image[:, mask] = torch.mean(image[:, mask], dim=1, keepdim=True)
     return occluded_image
@@ -84,7 +117,7 @@ def _fill_mean_color(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 # Properly normalized colors for black/white (to show correctly after denormalization):
 # Black (0,0,0): (0 - mean) / std
 NORMALIZED_BLACK = (-2.118, -2.036, -1.804)
-# White (1,1,1): (1 - mean) / std  
+# White (1,1,1): (1 - mean) / std
 NORMALIZED_WHITE = (2.249, 2.429, 2.640)
 
 # Fill Strategy Registry
@@ -106,17 +139,17 @@ def sort_pixels(heatmap: np.ndarray) -> np.ndarray:
         heatmap: 2D numpy array representing attribution map
         
     Returns:
-        Flattened array of pixel indices sorted by attribution value
+        Flattened array of pixel indices sorted by attribution value (ascending)
     """
     return np.argsort(heatmap.flatten())
 
 
 def apply_occlusion(
-        image: torch.Tensor,
-        sorted_pixel_indices: np.ndarray,
-        occlusion_level: int,
-        strategy: str,
-        image_shape: Tuple[int, int] = (224, 224)
+    image: torch.Tensor,
+    sorted_pixel_indices: np.ndarray,
+    occlusion_level: int,
+    strategy: str,
+    image_shape: Tuple[int, int] = (224, 224)
 ) -> torch.Tensor:
     """
     Apply occlusion to image based on sorted pixel importance.
@@ -125,33 +158,36 @@ def apply_occlusion(
         image: Original image tensor (C, H, W)
         sorted_pixel_indices: Flattened array of pixel indices sorted by importance
         occlusion_level: Percentage (0-100) of pixels to occlude
-        strategy: Fill strategy to use
+        strategy: Fill strategy to use (must be in FILL_STRATEGY_REGISTRY)
         image_shape: (Height, Width) of the image
         
     Returns:
         Occluded image as new tensor
+        
+    Raises:
+        ValueError: If strategy is not recognized or occlusion_level is invalid
     """
     if strategy not in FILL_STRATEGY_REGISTRY:
         raise ValueError(f"Fill strategy '{strategy}' is not recognized.")
-
+    
     if not (0 <= occlusion_level <= 100):
         raise ValueError("Occlusion level must be between 0 and 100.")
-
+    
     total_pixels = image_shape[0] * image_shape[1]
     num_pixels_to_occlude = int(total_pixels * (occlusion_level / 100.0))
-
+    
     if num_pixels_to_occlude == 0:
         return image.clone()
-
-    # Move the image to the same device as the torch (GPU obviously..), by the way - that BUG cost me something like 45 minute so a lot of respect to him
+    
+    # Ensure image is on the correct device (GPU for performance)
     image = image.to(DEVICE)
-
+    
     # Select least important pixels to occlude
     pixels_to_occlude_flat = sorted_pixel_indices[:num_pixels_to_occlude]
-
-    # Convert flat indices to 2D coordinates (more efficient with advanced indexing)
+    
+    # Convert flat indices to 2D coordinates
     rows, cols = np.unravel_index(pixels_to_occlude_flat, image_shape)
-
+    
     # Pre-allocate mask on GPU and fill efficiently
     mask = torch.zeros(image_shape, dtype=torch.bool, device=DEVICE)
     
@@ -159,20 +195,20 @@ def apply_occlusion(
     rows_tensor = torch.from_numpy(rows).to(DEVICE)
     cols_tensor = torch.from_numpy(cols).to(DEVICE)
     mask[rows_tensor, cols_tensor] = True
-
+    
     # Apply fill strategy
     fill_function = FILL_STRATEGY_REGISTRY[strategy]
     occluded_image = fill_function(image, mask)
-
+    
     return occluded_image
 
 
 def apply_occlusion_batch(
-        images: list[torch.Tensor],
-        sorted_pixel_indices_list: list[np.ndarray],
-        occlusion_level: int,
-        strategy: str,
-        image_shape: Tuple[int, int] = (224, 224)
+    images: list[torch.Tensor],
+    sorted_pixel_indices_list: list[np.ndarray],
+    occlusion_level: int,
+    strategy: str,
+    image_shape: Tuple[int, int] = (224, 224)
 ) -> list[torch.Tensor]:
     """
     Apply occlusion to a batch of images efficiently using vectorized operations.
@@ -184,28 +220,31 @@ def apply_occlusion_batch(
         images: List of image tensors, each (C, H, W)
         sorted_pixel_indices_list: List of flattened arrays of pixel indices sorted by importance
         occlusion_level: Percentage (0-100) of pixels to occlude
-        strategy: Fill strategy to use
+        strategy: Fill strategy to use (must be in FILL_STRATEGY_REGISTRY)
         image_shape: (Height, Width) of the image
         
     Returns:
         List of occluded image tensors
+        
+    Raises:
+        ValueError: If strategy is not recognized or occlusion_level is invalid
     """
     if strategy not in FILL_STRATEGY_REGISTRY:
         raise ValueError(f"Fill strategy '{strategy}' is not recognized.")
-
+    
     if not (0 <= occlusion_level <= 100):
         raise ValueError("Occlusion level must be between 0 and 100.")
-
+    
     if len(images) == 0:
         return []
-
+    
     total_pixels = image_shape[0] * image_shape[1]
     num_pixels_to_occlude = int(total_pixels * (occlusion_level / 100.0))
-
+    
     if num_pixels_to_occlude == 0:
         return [img.clone() for img in images]
-
-    # Ensure all images are on the same device (GPU)
+    
+    # Ensure all images are on the same device (GPU for performance)
     device = DEVICE
     images_gpu = [img.to(device, non_blocking=True) for img in images]
     
@@ -228,7 +267,7 @@ def apply_occlusion_batch(
     # Get fill function
     fill_function = FILL_STRATEGY_REGISTRY[strategy]
     
-    # Apply occlusion to all images - process in batches for fill operations
+    # Apply occlusion to all images
     occluded_images = []
     for i, image in enumerate(images_gpu):
         mask = masks[i]
@@ -243,9 +282,9 @@ def apply_occlusion_batch(
 
 
 def evaluate_judging_model(
-        judging_model: torch.nn.Module,
-        masked_image: torch.Tensor,
-        true_label: int
+    judging_model: torch.nn.Module,
+    masked_image: torch.Tensor,
+    true_label: int
 ) -> int:
     """
     Evaluate judging model's prediction on masked image.
@@ -260,13 +299,13 @@ def evaluate_judging_model(
     """
     with torch.no_grad():
         output = judging_model(masked_image)
-
+        
         # Handle different output formats
         if isinstance(output, tuple):
             output = output[0]
         if isinstance(output, dict):
             output = output['logits']
-
+        
         prediction = torch.argmax(output, dim=1).item()
-
+    
     return 1 if prediction == true_label else 0
