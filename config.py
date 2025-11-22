@@ -61,10 +61,12 @@ if torch.cuda.is_available():
 # Progress Tracking Configuration
 # -----------------
 # Auto-save progress every N completed items (0 to disable)
-PROGRESS_AUTO_SAVE_INTERVAL = 100
+
+PROGRESS_AUTO_SAVE_INTERVAL = 200
 
 # Auto-save progress every N seconds (0 to disable)
-PROGRESS_AUTO_SAVE_TIME = 300  # 5 minutes
+
+PROGRESS_AUTO_SAVE_TIME = 600  # 10 minutes
 
 # -----------------
 # Dataset Configuration

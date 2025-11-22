@@ -1,7 +1,11 @@
 """
 Batch evaluation for judging models.
 
-Handles efficient batch processing with memory management and error handling.
+⚠️ DEPRECATED: This module is no longer used in the codebase.
+The functionality has been integrated directly into phase2_runner.py
+for better performance and maintainability.
+
+This file is kept for reference only and may be removed in future versions.
 """
 
 from typing import List

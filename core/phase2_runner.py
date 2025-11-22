@@ -245,9 +245,9 @@ class Phase2Runner:
             
             # Clear GPU cache if memory usage is high before starting new judge
             _, current_usage = get_memory_usage()
-            if current_usage > 80.0:
-                clear_cache_if_needed(threshold_percent=80.0)
-                sync_and_clear()
+            if current_usage > 85.0:  # Raised threshold from 80 to 85
+                clear_cache_if_needed(threshold_percent=85.0)
+                # Skip sync_and_clear() - let it happen naturally
             
             for strategy in self.config.FILL_STRATEGIES:
                 self._evaluate_strategy(
@@ -420,31 +420,17 @@ class Phase2Runner:
             Array of predicted class indices
         """
         try:
-            # Get safe batch size based on GPU memory and thermal throttling
+            # Clear cache proactively if memory usage is high
             _, current_usage = get_memory_usage()
             if current_usage >= 80.0:
                 clear_cache_if_needed(threshold_percent=80.0)
+                _, current_usage = get_memory_usage()  # Re-check after clearing
             
-            # Calculate optimal batch size
-            optimal_batch_size = self.gpu_manager.get_optimal_inference_batch_size()
-            throttle_factor = getattr(self.gpu_manager, '_throttle_factor', 1.0)
-            safe_batch_size = calculate_safe_batch_size(
-                optimal_batch_size, current_usage, throttle_factor
-            )
-            
-            # Apply memory-based multipliers for better VRAM utilization
-            max_cap = getattr(self.config, "INFERENCE_MAX_BATCH", 2048)
-            if current_usage < 20.0:
-                safe_batch_size = min(int(safe_batch_size * 4.0), max_cap)
-            elif current_usage < 35.0:
-                safe_batch_size = min(int(safe_batch_size * 3.0), max_cap)
-            elif current_usage < 50.0:
-                safe_batch_size = min(int(safe_batch_size * 2.5), max_cap)
-            elif current_usage < 70.0:
-                safe_batch_size = min(int(safe_batch_size * 2.0), max_cap)
-            
-            # Check temperature
+            # Check temperature and adjust throttling
             self.gpu_manager.check_and_throttle()
+            
+            # Get optimal batch size (consolidated logic: includes memory, thermal, and base size)
+            safe_batch_size = self.gpu_manager.get_optimal_inference_batch_size(current_usage)
             
             # Process in chunks if batch is too large
             if len(batch_images) > safe_batch_size:
@@ -486,10 +472,10 @@ class Phase2Runner:
             
             # Periodic GPU maintenance every 10 chunks
             chunk_idx = i // chunk_size
-            if (chunk_idx > 0 and chunk_idx % 10 == 0) or (chunk_idx == num_chunks - 1):
+            if (chunk_idx > 0 and chunk_idx % 20 == 0):
                 _, current_usage = get_memory_usage()
-                if current_usage > 85.0:
-                    clear_cache_if_needed(threshold_percent=85.0)
+                if current_usage > 88.0:  # Only clear if critically high
+                    clear_cache_if_needed(threshold_percent=88.0)
                 self.gpu_manager.check_and_throttle()
         
         return np.array(all_predictions)
@@ -640,12 +626,16 @@ class Phase2Runner:
             dataset_name, gen_model, judge_model, method, strategy
         )
         
-        # Flatten results
+        # Flatten results (sorted by occlusion level for consistent output)
         all_results = []
         for level in sorted(results_by_level.keys()):
             all_results.extend(results_by_level[level])
         
-        # Save to CSV
+        # Skip if no results to save
+        if not all_results:
+            return
+        
+        # Save to CSV in one bulk write 
         header = ["image_id", "occlusion_level", "is_correct"]
         self.file_manager.save_csv(
             result_file, all_results, header=header, append=result_file.exists()
@@ -690,10 +680,13 @@ class OcclusionPipeline:
         self.gpu_manager = gpu_manager
         self.progress = progress
         
-        # Pipeline state
-        self.pipeline_depth = min(3, len(occlusion_levels))
+        # Pipeline state 
+        self.pipeline_depth = min(8, len(occlusion_levels)) 
         self.occluded_cache = {}  # Cache of pre-computed occluded batches
         self.prepared_futures = {}  # Futures for data preparation
+        
+        # Enable pinned memory for faster CPU→GPU transfers (if CUDA available)
+        self.use_pinned_memory = self.config.DEVICE == "cuda"
     
     def get_occluded_batch(
         self,
@@ -742,25 +735,22 @@ class OcclusionPipeline:
         Returns:
             Tuple of (images, sorted_indices, labels, info) or None
         """
-        images_to_process = []
-        sorted_indices_list = []
-        batch_labels = []
-        batch_info = []
         
-        for data in self.batch_data:
-            if self.progress.is_completed(
-                data['gen_model'], data['method'], data['img_id'],
-                self.judge_name, self.strategy, occlusion_level
-            ):
-                continue
-            
-            images_to_process.append(data['image'][0])
-            sorted_indices_list.append(data['sorted_indices'])
-            batch_labels.append(data['label'])
-            batch_info.append(data)
+        uncompleted_data = self.progress.filter_batch_uncompleted(
+            self.batch_data,
+            self.judge_name,
+            self.strategy,
+            occlusion_level
+        )
         
-        if not images_to_process:
+        if not uncompleted_data:
             return None, None, None, None
+        
+        # Extract data from filtered batch
+        images_to_process = [data['image'][0] for data in uncompleted_data]
+        sorted_indices_list = [data['sorted_indices'] for data in uncompleted_data]
+        batch_labels = [data['label'] for data in uncompleted_data]
+        batch_info = uncompleted_data  # Already filtered list
         
         return images_to_process, sorted_indices_list, batch_labels, batch_info
     
@@ -770,7 +760,9 @@ class OcclusionPipeline:
         data_tuple: Tuple
     ) -> Tuple[List[torch.Tensor], List[int], List[Dict]]:
         """
-        Apply occlusion to a batch of images.
+        Apply occlusion to a batch of images with enhanced GPU transfer.
+        
+        Uses pinned memory for faster CPU→GPU transfers when available.
         
         Args:
             occlusion_level: Occlusion percentage
@@ -782,13 +774,25 @@ class OcclusionPipeline:
         images, sorted_indices, labels, info = data_tuple
         
         try:
+            # Pin images in memory for faster CPU→GPU transfer (if enabled)
+            if self.use_pinned_memory and images:
+                # Check if images are on CPU and pin them
+                for i, img in enumerate(images):
+                    if img.device.type == 'cpu' and not img.is_pinned():
+                        try:
+                            images[i] = img.pin_memory()
+                        except Exception:
+                            pass  # Best effort: continue if pinning fails
+            
+            # Apply occlusion (already optimized with vectorization)
             masked_images = apply_occlusion_batch(
                 images, sorted_indices, occlusion_level, self.strategy
             )
             
-            # Apply GPU optimizations
+            # Apply GPU optimizations: channels_last + FP16
             if self.config.DEVICE == "cuda":
                 for i, img in enumerate(masked_images):
+                    # Channels-last memory format for better CNN performance
                     if img.ndim == 4:
                         try:
                             masked_images[i] = img.to(
@@ -796,6 +800,7 @@ class OcclusionPipeline:
                             )
                         except Exception:
                             pass
+                    # FP16 conversion for faster inference
                     if self.config.USE_FP16_INFERENCE and self.gpu_manager.supports_fp16():
                         masked_images[i] = masked_images[i].half()
             
@@ -819,6 +824,7 @@ class OcclusionPipeline:
         # Calculate how many levels ahead we should prepare
         levels_ahead = self.pipeline_depth - len(self.prepared_futures)
         
+        # Submit preparation tasks for future levels
         for offset in range(1, levels_ahead + 1):
             next_idx = current_idx + offset
             if next_idx >= len(self.occlusion_levels):
@@ -829,22 +835,28 @@ class OcclusionPipeline:
             
             if next_idx not in self.prepared_futures:
                 level = self.occlusion_levels[next_idx]
+                # Submit data preparation task to thread pool
                 future = executor.submit(self._prepare_occlusion_data, level)
                 self.prepared_futures[next_idx] = future
         
-        # Check completed futures and occlude batches
+        # Check completed futures and apply occlusion (CPU-bound work)
         for idx in list(self.prepared_futures.keys()):
             if idx <= current_idx:
                 continue  # Skip past levels
             
             future = self.prepared_futures[idx]
             if future.done():
-                data_tuple = future.result()
-                del self.prepared_futures[idx]
-                
-                if data_tuple[0] is not None:
-                    level = self.occlusion_levels[idx]
-                    occluded_batch = self._occlude_batch(level, data_tuple)
-                    if occluded_batch:
-                        self.occluded_cache[idx] = occluded_batch
+                try:
+                    data_tuple = future.result()
+                    del self.prepared_futures[idx]
+                    
+                    if data_tuple[0] is not None:
+                        level = self.occlusion_levels[idx]
+                        # Apply occlusion immediately to keep cache warm
+                        occluded_batch = self._occlude_batch(level, data_tuple)
+                        if occluded_batch:
+                            self.occluded_cache[idx] = occluded_batch
+                except Exception as e:
+                    logging.warning(f"Error preparing level {idx}: {e}")
+                    del self.prepared_futures[idx]
 

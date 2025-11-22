@@ -163,7 +163,18 @@ class GPUManager:
         """Synchronize GPU operations and clear cache."""
         sync_and_clear()
     
-    def get_optimal_inference_batch_size(self) -> int:
+    # Lookup table for memory-based batch size multipliers (cleaner than nested ifs)
+    _MEMORY_USAGE_MULTIPLIERS = [
+        (20.0, 4.0),   # < 20% usage
+        (35.0, 3.0),   # < 35% usage
+        (50.0, 2.5),   # < 50% usage
+        (70.0, 2.0),   # < 70% usage
+        (85.0, 1.0),   # < 85% usage
+        (92.0, 0.5),   # < 92% usage
+        (100.0, 0.25), # >= 92% usage
+    ]
+    
+    def get_optimal_inference_batch_size(self, current_memory_usage: float = None) -> int:
         """
         Get optimal inference batch size based on GPU memory.
         
@@ -171,24 +182,36 @@ class GPUManager:
         Batch sizes are aggressively increased for high-VRAM GPUs to maximize utilization.
         
         Returns:
-            Optimal batch size (adjusted for thermal throttling)
+            Optimal batch size (adjusted for all factors)
         """
-        # Base batch sizes by GPU memory
+        # Base batch sizes by total GPU memory
         if self.gpu_memory_gb >= 22:
-            # Very high-VRAM GPUs can handle large batches
-            base_size = 768
+            base_size = 768   # Very high-VRAM GPUs
         elif self.gpu_memory_gb >= 16:
-            # High-VRAM GPUs
-            base_size = 512
+            base_size = 512   # High-VRAM GPUs
         elif self.gpu_memory_gb > 8:
-            # Mid-range GPUs
-            base_size = 256
+            base_size = 256   # Mid-range GPUs
         else:
-            # Low-VRAM GPUs
-            base_size = 64
+            base_size = 64    # Low-VRAM GPUs
         
-        # Apply thermal throttling factor
-        return int(base_size * self._throttle_factor)
+        # Apply thermal throttling first
+        base_size = int(base_size * self._throttle_factor)
+        
+        # Apply memory pressure adjustment (using lookup table)
+        if current_memory_usage is None:
+            _, current_memory_usage = self.get_memory_usage()
+        
+        memory_multiplier = 1.0
+        for threshold, multiplier in self._MEMORY_USAGE_MULTIPLIERS:
+            if current_memory_usage < threshold:
+                memory_multiplier = multiplier
+                break
+        
+        # Calculate final batch size with cap
+        final_size = int(base_size * memory_multiplier)
+        max_cap = 2048  # Hard cap to avoid excessive batches
+        
+        return max(1, min(final_size, max_cap))
     
     def get_safe_batch_size(self, desired: int, current_usage_percent: float) -> int:
         """

@@ -68,37 +68,19 @@ class BatchSizeManager:
         """
         Calculate optimal batch size based on current GPU conditions.
         
+        Uses consolidated batch size logic from GPU manager (simplified).
+        
         Returns:
             Optimal batch size for inference
         """
-        # Get base batch size from GPU manager
-        base_size = self.gpu_manager.get_optimal_inference_batch_size()
-        
-        # Check memory usage
+        # Get current memory usage
         _, current_usage = self.gpu_manager.get_memory_usage()
         
-        # Adjust based on memory usage
-        base_size = self.gpu_manager.get_safe_batch_size(base_size, current_usage)
-        
-        # Check GPU temperature and throttle if needed
+        # Check GPU temperature and adjust throttling
         self.gpu_manager.check_and_throttle()
-        throttle_factor = getattr(self.gpu_manager, '_throttle_factor', 1.0)
-        base_size = int(base_size * throttle_factor)
         
-        # Aggressive multipliers for better VRAM utilization when GPU is underutilized
-        max_cap = getattr(self.config, "INFERENCE_MAX_BATCH", 2048)
-        
-        if current_usage < 20.0:
-            # Very low usage - be very aggressive
-            base_size = min(int(base_size * 4.0), max_cap)
-        elif current_usage < 35.0:
-            base_size = min(int(base_size * 3.0), max_cap)
-        elif current_usage < 50.0:
-            base_size = min(int(base_size * 2.5), max_cap)
-        elif current_usage < 70.0:
-            base_size = min(int(base_size * 2.0), max_cap)
-        
-        return base_size
+        # Get optimal batch size (all logic consolidated in GPU manager)
+        return self.gpu_manager.get_optimal_inference_batch_size(current_usage)
     
     def should_clear_cache(self, threshold_percent: float = 80.0) -> bool:
         """

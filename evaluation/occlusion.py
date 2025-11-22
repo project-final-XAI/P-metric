@@ -64,11 +64,16 @@ def _fill_gray(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 
 
 def _fill_blur(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Fill masked area with blurred version of image."""
-    occluded_image = image.clone()
+    """Fill masked area with blurred version of image (optimized: reuse blurred result)."""
     blur_transform = _get_blur_transform()
     blurred_image = blur_transform(image)
-    occluded_image[:, mask] = blurred_image[:, mask]
+    # Use blurred image as base and restore non-masked pixels (more efficient for large masks)
+    if mask.sum() > mask.numel() * 0.5:  # If more than 50% masked
+        occluded_image = blurred_image
+        occluded_image[:, ~mask] = image[:, ~mask]
+    else:
+        occluded_image = image.clone()
+        occluded_image[:, mask] = blurred_image[:, mask]
     return occluded_image
 
 
@@ -96,9 +101,9 @@ def _fill_solid_color(image: torch.Tensor, mask: torch.Tensor, color) -> torch.T
     
     # Handle per-channel colors (for normalized images)
     if isinstance(color, (tuple, list)):
-        # Color is (R, G, B) values for each channel
-        for c in range(3):
-            occluded_image[c, mask] = color[c]
+        # Convert to tensor for vectorized assignment
+        color_tensor = torch.tensor(color, dtype=image.dtype, device=image.device).view(3, 1)
+        occluded_image[:, mask] = color_tensor
     else:
         # Single value for all channels
         occluded_image[:, mask] = color
@@ -107,9 +112,11 @@ def _fill_solid_color(image: torch.Tensor, mask: torch.Tensor, color) -> torch.T
 
 
 def _fill_mean_color(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Fill masked area with mean color of the image."""
+    """Fill masked area with mean color of the image (optimized: compute mean once)."""
     occluded_image = image.clone()
-    occluded_image[:, mask] = torch.mean(image[:, mask], dim=1, keepdim=True)
+    # Compute mean per channel (more accurate than global mean)
+    mean_colors = torch.mean(image, dim=(1, 2), keepdim=True)  # Shape: (C, 1, 1)
+    occluded_image[:, mask] = mean_colors.expand_as(occluded_image)[:, mask]
     return occluded_image
 
 
@@ -176,24 +183,27 @@ def apply_occlusion(
     total_pixels = image_shape[0] * image_shape[1]
     num_pixels_to_occlude = int(total_pixels * (occlusion_level / 100.0))
     
+    # Early return: no occlusion needed
     if num_pixels_to_occlude == 0:
-        return image.clone()
+        return image
     
     # Ensure image is on the correct device (GPU for performance)
-    image = image.to(DEVICE)
+    # Only transfer if not already on target device
+    if image.device.type != DEVICE:
+        image = image.to(DEVICE, non_blocking=True)
     
     # Select least important pixels to occlude
     pixels_to_occlude_flat = sorted_pixel_indices[:num_pixels_to_occlude]
     
-    # Convert flat indices to 2D coordinates
+    # Convert flat indices to 2D coordinates (vectorized numpy operation)
     rows, cols = np.unravel_index(pixels_to_occlude_flat, image_shape)
     
     # Pre-allocate mask on GPU and fill efficiently
     mask = torch.zeros(image_shape, dtype=torch.bool, device=DEVICE)
     
-    # Use torch tensors for indexing (faster than numpy indexing)
-    rows_tensor = torch.from_numpy(rows).to(DEVICE)
-    cols_tensor = torch.from_numpy(cols).to(DEVICE)
+    # Convert to torch tensors once (minimize conversions)
+    rows_tensor = torch.from_numpy(rows).to(DEVICE, non_blocking=True)
+    cols_tensor = torch.from_numpy(cols).to(DEVICE, non_blocking=True)
     mask[rows_tensor, cols_tensor] = True
     
     # Apply fill strategy
@@ -241,43 +251,59 @@ def apply_occlusion_batch(
     total_pixels = image_shape[0] * image_shape[1]
     num_pixels_to_occlude = int(total_pixels * (occlusion_level / 100.0))
     
+    # Early return: no occlusion needed, return images directly (no cloning unless modified)
     if num_pixels_to_occlude == 0:
-        return [img.clone() for img in images]
+        return images  # No need to clone if not modifying
     
     # Ensure all images are on the same device (GPU for performance)
     device = DEVICE
-    images_gpu = [img.to(device, non_blocking=True) for img in images]
+    batch_size = len(images)
     
-    # Pre-allocate all masks on GPU at once for better memory efficiency
-    batch_size = len(images_gpu)
+    # Check if images are already on target device to avoid unnecessary transfers
+    if all(img.device.type == device for img in images):
+        images_gpu = images  # No transfer needed
+    else:
+        images_gpu = [img.to(device, non_blocking=True) for img in images]
+    
+    # Pre-allocate all masks on GPU as single 3D tensor for better memory efficiency
     masks = torch.zeros((batch_size, image_shape[0], image_shape[1]), dtype=torch.bool, device=device)
     
-    # Create masks for all images efficiently
+    # Vectorized mask creation: process all images at once
+    # Collect all row/col indices for vectorized assignment
+    all_rows = []
+    all_cols = []
+    batch_indices = []
+    
     for i, sorted_indices in enumerate(sorted_pixel_indices_list):
         if num_pixels_to_occlude > 0:
             pixels_to_occlude_flat = sorted_indices[:num_pixels_to_occlude]
             rows, cols = np.unravel_index(pixels_to_occlude_flat, image_shape)
             
-            # Convert to torch tensors and set mask
-            rows_tensor = torch.from_numpy(rows).to(device, non_blocking=True)
-            cols_tensor = torch.from_numpy(cols).to(device, non_blocking=True)
-            # Index into the 2D mask for this image: masks[i] is shape (H, W)
-            masks[i][rows_tensor, cols_tensor] = True
+            all_rows.append(rows)
+            all_cols.append(cols)
+            batch_indices.append(np.full(len(rows), i, dtype=np.int64))
+    
+    # Concatenate all indices and convert to torch tensors once (minimize conversions)
+    if all_rows:
+        batch_idx_tensor = torch.from_numpy(np.concatenate(batch_indices)).to(device, non_blocking=True)
+        rows_tensor = torch.from_numpy(np.concatenate(all_rows)).to(device, non_blocking=True)
+        cols_tensor = torch.from_numpy(np.concatenate(all_cols)).to(device, non_blocking=True)
+        
+        # Vectorized mask assignment: set all pixels at once across all images
+        masks[batch_idx_tensor, rows_tensor, cols_tensor] = True
     
     # Get fill function
     fill_function = FILL_STRATEGY_REGISTRY[strategy]
     
-    # Apply occlusion to all images
+    # Apply occlusion to all images (still need per-image processing for fill strategies)
+    # Note: Some fill strategies (like blur, mean) need per-image context
     occluded_images = []
     for i, image in enumerate(images_gpu):
         mask = masks[i]
         occluded_image = fill_function(image, mask)
         occluded_images.append(occluded_image)
     
-    # Free masks and images_gpu from memory after processing
-    del masks
-    del images_gpu
-    
+    # Cleanup: masks tensor freed automatically when out of scope
     return occluded_images
 
 
