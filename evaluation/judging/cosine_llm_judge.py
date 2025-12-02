@@ -4,20 +4,17 @@ Cosine Similarity LLM Judge - Open-ended with similarity matching.
 Asks "What do you see?" and compares the answer to class names using
 cosine similarity of embeddings. More flexible than exact matching.
 """
-
 import ollama
 import torch
 import numpy as np
 from typing import List, Tuple
-import os
 import logging
+import os
+import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from evaluation.judging.base_llm_judge import BaseLLMJudge, MAX_PARALLEL_WORKERS
-
-# Silence httpx logging from ollama
-logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 class CosineSimilarityLLMJudge(BaseLLMJudge):
@@ -51,15 +48,6 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
         self.temperature = temperature
         self.similarity_threshold = similarity_threshold
         self.embedding_model = embedding_model
-        
-        # Extract actual Ollama model name (remove -binary/-cosine suffix)
-        # e.g., "llama3.2-vision-cosine" -> "llama3.2-vision"
-        if model_name.endswith('-binary'):
-            self.ollama_model_name = model_name[:-7]  # Remove '-binary'
-        elif model_name.endswith('-cosine'):
-            self.ollama_model_name = model_name[:-7]  # Remove '-cosine'
-        else:
-            self.ollama_model_name = model_name
 
         # Load or compute class name embeddings
         self.class_embeddings = self._load_or_compute_embeddings()
@@ -213,17 +201,18 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
 
         return int(best_idx), float(max_similarity)
 
-    def _predict_single_image(
+    
+    def _predict_single_image_from_path(
             self,
-            img_tensor: torch.Tensor,
-            true_label: int,  # Add true_label parameter
+            image_path: str,
+            true_label: int,
             img_index: int
     ) -> Tuple[int, int, float]:
         """
-        Predict class for a single image using open-ended question.
+        Predict class for a single image using open-ended question (optimized - uses file path directly).
         
         Args:
-            img_tensor: Image tensor (C, H, W)
+            image_path: Path to image file (PNG/JPG)
             true_label: True class label (for logging purposes)
             img_index: Original index in batch
             
@@ -231,83 +220,62 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
             Tuple of (img_index, predicted_class_index, similarity_score)
         """
         try:
-            temp_image_path = self._tensor_to_temp_file(img_tensor)
+            # Ask open-ended question
+            prompt = (
+                "Look at this image carefully. What do you see? "
+                "Describe the main object or subject in one or two words."
+            )
 
-            try:
-                # Ask open-ended question
-                prompt = (
-                    "Look at this image carefully. What do you see? "
-                    "Describe the main object or subject in one or two words."
-                )
+            # Use shared retry helper method
+            response_text = self._call_ollama_with_retry(
+                prompt=prompt,
+                image_path=image_path,
+                max_retries=3,
+                temperature=self.temperature
+            )
 
-                # Call Ollama API
-                response = ollama.chat(
-                    model=self.ollama_model_name,  # Use actual Ollama model name instead of self.model_name
-                    messages=[
-                        {
-                            'role': 'user',
-                            'content': prompt,
-                            'images': [temp_image_path]
-                        }
-                    ],
-                    options={
-                        'temperature': self.temperature,
-                    }
-                )
-
-                response_text = response.message.content.strip()
-
-                # Compute embedding ONCE for this response
-                response_embedding = self._get_embedding(response_text)
-                
-                if response_embedding is None:
-                    logging.warning(f"Image {img_index}: Failed to compute embedding")
-                    return img_index, -1, 0.0
-                
-                # Step 1: Check similarity to TRUE class first
-                true_class_similarity = self._compute_similarity_to_class(response_embedding, true_label)
-                
-                # Validate true_label for logging
-                true_class_name = "invalid" if (true_label < 0 or true_label >= len(self.class_names)) else self.class_names[true_label]
-                
-                # Step 2: If true class similarity meets threshold, return it (skip computing all similarities)
-                if true_class_similarity >= self.similarity_threshold:
-                    logging.info(
-                        f"Image {img_index}: '{response_text}' -> "
-                        f"True class match: {true_class_name}, similarity={true_class_similarity:.3f} (>= threshold)"
-                    )
-                    return img_index, true_label, true_class_similarity
-                
-                # Step 3: Otherwise, find best match among all classes (only if true class didn't pass)
-                best_class, best_similarity = self._compute_similarity(response_embedding)
-                
-                if best_class < 0:
-                    # Should not happen since we already checked embedding above
-                    logging.warning(
-                        f"Image {img_index}: Failed to compute similarity. "
-                        f"True class similarity={true_class_similarity:.3f}"
-                    )
-                    return img_index, -1, true_class_similarity
-                
-                best_class_name = self.class_names[best_class]
-                
+            # Compute embedding ONCE for this response
+            response_embedding = self._get_embedding(response_text)
+            
+            if response_embedding is None:
+                logging.warning(f"Image {img_index}: Failed to compute embedding")
+                return img_index, -1, 0.0
+            
+            # Step 1: Check similarity to TRUE class first
+            true_class_similarity = self._compute_similarity_to_class(response_embedding, true_label)
+            
+            # Validate true_label for logging
+            true_class_name = "invalid" if (true_label < 0 or true_label >= len(self.class_names)) else self.class_names[true_label]
+            
+            # Step 2: If true class similarity meets threshold, return it (skip computing all similarities)
+            if true_class_similarity >= self.similarity_threshold:
                 logging.info(
                     f"Image {img_index}: '{response_text}' -> "
-                    f"True class similarity={true_class_similarity:.3f} (< threshold), "
-                    f"Best match: Class {best_class} ({best_class_name}), similarity={best_similarity:.3f}, "
-                    f"real class is: {true_class_name}"
+                    f"True class match: {true_class_name}, similarity={true_class_similarity:.3f} (>= threshold)"
                 )
-                
-                # Return best match (could be true class if it's the best, just below threshold)
-                return img_index, best_class, best_similarity
-
-            finally:
-                # Clean up temporary file
-                if os.path.exists(temp_image_path):
-                    try:
-                        os.remove(temp_image_path)
-                    except Exception:
-                        pass
+                return img_index, true_label, true_class_similarity
+            
+            # Step 3: Otherwise, find best match among all classes (only if true class didn't pass)
+            best_class, best_similarity = self._compute_similarity(response_embedding)
+            
+            if best_class < 0:
+                logging.warning(
+                    f"Image {img_index}: Failed to compute similarity. "
+                    f"True class similarity={true_class_similarity:.3f}"
+                )
+                return img_index, -1, true_class_similarity
+            
+            best_class_name = self.class_names[best_class]
+            
+            logging.info(
+                f"Image {img_index}: '{response_text}' -> "
+                f"True class similarity={true_class_similarity:.3f} (< threshold), "
+                f"Best match: Class {best_class} ({best_class_name}), similarity={best_similarity:.3f}, "
+                f"real class is: {true_class_name}"
+            )
+            
+            # Return best match (could be true class if it's the best, just below threshold)
+            return img_index, best_class, best_similarity
 
         except Exception as e:
             logging.error(f"Error predicting image {img_index} with CosineSimilarityLLMJudge: {e}")

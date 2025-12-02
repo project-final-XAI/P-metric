@@ -17,7 +17,10 @@ import torch
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # Configure PyTorch CUDA memory allocator for better performance
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+# Remove deprecated variable to avoid warnings
+if "PYTORCH_CUDA_ALLOC_CONF" in os.environ:
+    del os.environ["PYTORCH_CUDA_ALLOC_CONF"]
 
 # Suppress torch dynamo verbose output
 os.environ["TORCHDYNAMO_VERBOSE"] = "0"
@@ -43,6 +46,11 @@ ANALYSIS_DIR = BASE_DIR / "results" / "analysis"
 MAX_WORKERS = 8  # Number of data loader workers
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 HEATMAP_BATCH_SIZE = 12
+PHASE2_BATCH_SIZE = 128  # Batch size for Phase 2 occlusion processing (GPU)
+PHASE2_SAVE_WORKERS = 4  # Number of workers for parallel image saving (CPU)
+PHASE3_BATCH_SIZE_PYTORCH = 512  # Batch size for Phase 3 PyTorch model evaluation (GPU) - increased for better GPU utilization
+PHASE3_BATCH_SIZE_LLM = 32  # Batch size for Phase 3 LLM model evaluation (CPU/API) - smaller batches = continuous processing, no gaps
+PHASE3_LOAD_WORKERS = 8  # Number of workers for parallel image loading in Phase 3
 
 # -----------------
 # Performance Optimization
@@ -97,11 +105,12 @@ GENERATING_MODELS = [
 
 # Models used for evaluating occluded images (Phase 2)
 JUDGING_MODELS = [
-    # PyTorch models
-    # "resnet50",
+    "resnet50",
+    "mobilenet_v2",
+
     # "vit_b_16",
-    # "mobilenet_v2",
     # "swin_t",
+
     # "sipakmed_efficientnetB0.pth"
     # "sipakmed_cropped_efficientnet.pth",
 
@@ -120,7 +129,7 @@ ATTRIBUTION_METHODS = [
     # "integrated_gradients",
     "occlusion",
     # "gradientshap",
-    # "xrai",
+    "xrai",
     "grad_cam",
     # "guided_gradcam",
     "random_baseline",
@@ -135,10 +144,17 @@ OCCLUSION_LEVELS = list(range(0, 100, 5))
 
 # Fill strategies for occluded pixels
 FILL_STRATEGIES = [
-    # "gray",
+    "gray",
     # "blur",
     # "random_noise",
     # "black",
     "mean",
     # "white",
 ]
+
+# -----------------
+# Heatmap Visualization Configuration
+# -----------------
+# Colormap for regular heatmap visualization (Phase 1)
+# Options: "hot", "jet", "viridis", "rainbow", "turbo"
+HEATMAP_COLORMAP = "hot"

@@ -8,12 +8,15 @@ This phase creates sorted pixel indices files that are used in Phase 2 for occlu
 import numpy as np
 import torch
 import logging
+import cv2
+from pathlib import Path
+from PIL import Image
 from tqdm import tqdm
 from typing import Dict, Any
 
 from core.gpu_manager import GPUManager
 from core.file_manager import FileManager
-from core.gpu_utils import transfer_to_device, clear_cache_if_needed, prepare_batch_tensor
+from core.gpu_utils import clear_cache_if_needed, prepare_batch_tensor
 from attribution.registry import get_attribution_method
 from data.loader import get_dataloader
 from evaluation.occlusion import sort_pixels
@@ -133,12 +136,15 @@ class Phase1Runner:
         labels = []
         
         for img_id, (img, label) in list(image_label_map.items()):
-            sorted_path = self.file_manager.get_heatmap_path(
-                dataset_name, model_name, method_name, img_id, sorted=True
+            sorted_path = self.file_manager.get_sorted_heatmap_path(
+                dataset_name, model_name, method_name, img_id
+            )
+            regular_path = self.file_manager.get_regular_heatmap_path(
+                dataset_name, model_name, method_name, img_id
             )
             
-            # Only process if sorted indices file doesn't exist
-            if not sorted_path.exists():
+            # Only process if either file doesn't exist
+            if not sorted_path.exists() or not regular_path.exists():
                 images_to_process.append(img)
                 image_ids.append(img_id)
                 labels.append(label)
@@ -173,20 +179,104 @@ class Phase1Runner:
             else:
                 heatmaps = method.compute(model, batch_images, batch_labels)
             
-            # Save sorted pixel indices
+            # Save sorted pixel indices and regular PNG
             if heatmaps is not None:
                 for j, heatmap in enumerate(heatmaps):
                     img_id = image_ids[i + j]
                     heatmap_np = heatmap.cpu().numpy()
                     
-                    # Sort pixels by importance and save
+                    # Handle multi-channel heatmaps (take mean if needed)
+                    if heatmap_np.ndim == 3:
+                        heatmap_np = np.mean(heatmap_np, axis=0)
+                    
+                    # Sort pixels by importance and save NPY
                     sorted_indices = sort_pixels(heatmap_np)
-                    sorted_path = self.file_manager.get_heatmap_path(
-                        dataset_name, model_name, method_name, img_id, sorted=True
+                    sorted_path = self.file_manager.get_sorted_heatmap_path(
+                        dataset_name, model_name, method_name, img_id
                     )
+                    self.file_manager.ensure_dir_exists(sorted_path.parent)
                     np.save(sorted_path, sorted_indices)
+                    
+                    # Save regular PNG heatmap
+                    regular_path = self.file_manager.get_regular_heatmap_path(
+                        dataset_name, model_name, method_name, img_id
+                    )
+                    self.file_manager.ensure_dir_exists(regular_path.parent)
+                    self._save_heatmap_png(heatmap_np, regular_path)
         
         # Cleanup: check temperature and clear cache if needed
         self.gpu_manager.check_and_throttle()
         clear_cache_if_needed(threshold_percent=50.0)
+    
+    def _save_heatmap_png(self, heatmap: np.ndarray, path: Path):
+        """
+        Save heatmap as PNG image with colormap.
+        
+        Args:
+            heatmap: 2D numpy array representing heatmap
+            path: Path to save PNG file
+        """
+        # Normalize to 0-1
+        hmap = heatmap.copy()
+        hmap = (hmap - hmap.min()) / (hmap.max() - hmap.min() + 1e-8)
+        
+        # Convert to uint8
+        hmap_uint8 = (hmap * 255).astype(np.uint8)
+        
+        # Map colormap names to OpenCV constants
+        colormap_dict = {
+            "hot": cv2.COLORMAP_HOT,
+            "jet": cv2.COLORMAP_JET,
+            "viridis": cv2.COLORMAP_VIRIDIS,
+            "rainbow": cv2.COLORMAP_RAINBOW,
+            "turbo": cv2.COLORMAP_TURBO,
+        }
+        
+        colormap = getattr(self.config, 'HEATMAP_COLORMAP', 'hot')
+        cv_colormap = colormap_dict.get(colormap.lower(), cv2.COLORMAP_HOT)
+        
+        # Apply colormap
+        heatmap_colored = cv2.applyColorMap(hmap_uint8, cv_colormap)
+        heatmap_rgb = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
+        
+        # Save as PNG
+        Image.fromarray(heatmap_rgb).save(path, 'PNG')
+
+
+def main():
+    """Simple main function to run Phase 1."""
+    import sys
+    import logging
+    from pathlib import Path
+    
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    import config
+    from core.gpu_manager import GPUManager
+    from core.file_manager import FileManager
+    from models.loader import load_model
+    from evaluation.judging.binary_llm_judge import BinaryLLMJudge
+    from evaluation.judging.cosine_llm_judge import CosineSimilarityLLMJudge
+    
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    
+    gpu_manager = GPUManager()
+    file_manager = FileManager(config.BASE_DIR)
+    model_cache = {}
+    
+    def get_cached_model(name):
+        if name not in model_cache:
+            if name.endswith('-binary'):
+                model_cache[name] = BinaryLLMJudge(name, config.DATASET_NAME, 0.0)
+            elif name.endswith('-cosine'):
+                model_cache[name] = CosineSimilarityLLMJudge(name, config.DATASET_NAME, 0.1, 0.8, "nomic-embed-text")
+            else:
+                model_cache[name] = load_model(name)
+        return model_cache[name]
+    
+    runner = Phase1Runner(config, gpu_manager, file_manager, model_cache)
+    runner.run(get_cached_model)
+
+
+if __name__ == "__main__":
+    main()
 

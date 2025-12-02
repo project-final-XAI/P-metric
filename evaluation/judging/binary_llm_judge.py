@@ -8,18 +8,16 @@ Simple and direct approach - only one question per image.
 
 Most efficient and straightforward evaluation method.
 """
+import os
+
 import ollama
 import torch
 import numpy as np
 from typing import List, Tuple
-import os
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from evaluation.judging.base_llm_judge import BaseLLMJudge, MAX_PARALLEL_WORKERS
-
-# Silence httpx logging from ollama
-logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 class BinaryLLMJudge(BaseLLMJudge):
@@ -44,16 +42,6 @@ class BinaryLLMJudge(BaseLLMJudge):
         """
         super().__init__(model_name, dataset_name)
         self.temperature = temperature
-
-        # Extract actual Ollama model name (remove -binary/-cosine suffix)
-        # e.g., "llama3.2-vision-binary" -> "llama3.2-vision"
-        if model_name.endswith('-binary'):
-            self.ollama_model_name = model_name[:-7]  # Remove '-binary'
-        elif model_name.endswith('-cosine'):
-            self.ollama_model_name = model_name[:-7]  # Remove '-cosine'
-        else:
-            self.ollama_model_name = model_name
-
         logging.info(f"BinaryLLMJudge initialized with {len(self.class_names)} classes, temperature={temperature}")
 
     def _clean_response(self, response_text: str) -> str:
@@ -83,21 +71,17 @@ class BinaryLLMJudge(BaseLLMJudge):
         # Default to no if unclear
         return 'no'
 
-    def _predict_single_image(
+    def _predict_single_image_from_path(
             self,
-            img_tensor: torch.Tensor,
+            image_path: str,
             true_label: int,
             img_index: int
     ) -> Tuple[int, int]:
         """
-        Predict class for a single image using binary yes/no question.
-        
-        Simply asks if the LLM sees the true class in the image.
-        - If "yes" → correct prediction (returns true_label)
-        - If "no" → incorrect prediction (returns -1 to mark as wrong)
+        Predict class for a single image using binary yes/no question (optimized - uses file path directly).
         
         Args:
-            img_tensor: Image tensor (C, H, W)
+            image_path: Path to image file (PNG/JPG)
             true_label: True class label
             img_index: Original index in batch
             
@@ -105,91 +89,35 @@ class BinaryLLMJudge(BaseLLMJudge):
             Tuple of (img_index, predicted_class_index)
         """
         try:
-            temp_image_path = self._tensor_to_temp_file(img_tensor)
+            # Get the true class name
+            class_name = self._format_class_name(self.class_names[true_label])
 
-            try:
-                # Get the true class name
-                class_name = self._format_class_name(self.class_names[true_label])
+            # Binary question - based on research paper approach
+            prompt = (f"You are an image classification expert. "
+                      f"What do you see in the picture? "
+                      f"Is it a {class_name} from the imagenet database? "
+                      f"Answer with only 'Yes' or 'No'.")
 
-                # Binary question - based on research paper approach
-                prompt = (f"You are an image classification expert. "
-                          f"What do you see in the picture? "
-                          f"Is it a {class_name} from the imagenet database? "
-                          f"Answer with only 'Yes' or 'No'.")
+            # Use shared retry helper method
+            response_text = self._call_ollama_with_retry(
+                prompt=prompt,
+                image_path=image_path,
+                max_retries=3,
+                temperature=self.temperature
+            )
 
-                response = ollama.chat(
-                    model=self.ollama_model_name,
-                    messages=[
-                        {
-                            'role': 'user',
-                            'content': prompt,
-                            'images': [temp_image_path]
-                        }
-                    ],
-                    options={'temperature': self.temperature}
-                )
+            answer = self._clean_response(response_text)
 
-                response_text = response.message.content.strip()
-                answer = self._clean_response(response_text)
-
-                # If LLM says "yes", it correctly identified the class
-                # If LLM says "no", it failed to identify the class
-                logging.info(f"LLM response for {class_name}: '{response_text}' -> {answer}")
-                if answer == 'yes':
-                    return img_index, true_label  # Correct!
-                else:
-                    # Return a different class to mark as incorrect
-                    wrong_class = (true_label + 1) % len(self.class_names)
-                    return img_index, wrong_class  # Incorrect!
-
-            finally:
-                # Clean up temporary file
-                if os.path.exists(temp_image_path):
-                    try:
-                        os.remove(temp_image_path)
-                    except Exception:
-                        pass
+            # If LLM says "yes", it correctly identified the class
+            # If LLM says "no", it failed to identify the class
+            logging.info(f"LLM response for {class_name}: '{response_text}' -> {answer}")
+            if answer == 'yes':
+                return img_index, true_label  # Correct!
+            else:
+                # Return a different class to mark as incorrect
+                wrong_class = (true_label + 1) % len(self.class_names)
+                return img_index, wrong_class  # Incorrect!
 
         except Exception as e:
             logging.error(f"Error predicting image {img_index} with BinaryLLMJudge: {e}")
             return (img_index, -1)
-
-    def predict(self, images: List[torch.Tensor], true_labels: List[int] = None, **kwargs) -> np.ndarray:
-        """
-        Predict classes for given images using binary yes/no questions.
-        
-        Args:
-            images: List of image tensors (C, H, W) - normalized ImageNet format
-            true_labels: List of true labels (optional, for targeted questioning)
-            **kwargs: Additional parameters
-            
-        Returns:
-            Array of predicted class indices (shape: [batch_size])
-        """
-        if len(images) == 0:
-            return np.array([], dtype=np.int64)
-
-        # Get true labels if provided
-        if true_labels is None:
-            true_labels = [0] * len(images)  # Fallback
-
-        # Process images in parallel
-        max_workers = min(MAX_PARALLEL_WORKERS, len(images))
-        predictions = [None] * len(images)
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_idx = {
-                executor.submit(self._predict_single_image, img, true_labels[idx], idx): idx
-                for idx, img in enumerate(images)
-            }
-
-            for future in as_completed(future_to_idx):
-                try:
-                    img_idx, class_idx = future.result()
-                    predictions[img_idx] = class_idx
-                except Exception as e:
-                    idx = future_to_idx[future]
-                    logging.error(f"Unexpected error processing image {idx}: {e}")
-                    predictions[idx] = -1
-
-        return np.array(predictions, dtype=np.int64)

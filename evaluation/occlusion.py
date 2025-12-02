@@ -76,8 +76,10 @@ def _fill_mean_color(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """Fill masked area with mean color of the image (optimized: compute mean once)."""
     occluded_image = image.clone()
     # Compute mean per channel (more accurate than global mean)
-    mean_colors = torch.mean(image, dim=(1, 2), keepdim=True)  # Shape: (C, 1, 1)
-    occluded_image[:, mask] = mean_colors.expand_as(occluded_image)[:, mask]
+    mean_colors = torch.mean(image, dim=(1, 2))  # Shape: (C,)
+    # Use same approach as _fill_solid_color - reshape to (C, 1) for broadcasting
+    mean_colors = mean_colors.unsqueeze(1)  # Shape: (C, 1)
+    occluded_image[:, mask] = mean_colors
     return occluded_image
 
 
@@ -144,9 +146,9 @@ def apply_occlusion(
     total_pixels = image_shape[0] * image_shape[1]
     num_pixels_to_occlude = int(total_pixels * (occlusion_level / 100.0))
     
-    # Early return: no occlusion needed
+    # Early return: no occlusion needed, but clone to avoid reference issues
     if num_pixels_to_occlude == 0:
-        return image
+        return image.clone()
     
     # Ensure image is on the correct device (GPU for performance)
     # Only transfer if not already on target device
@@ -212,9 +214,9 @@ def apply_occlusion_batch(
     total_pixels = image_shape[0] * image_shape[1]
     num_pixels_to_occlude = int(total_pixels * (occlusion_level / 100.0))
     
-    # Early return: no occlusion needed, return images directly (no cloning unless modified)
+    # Early return: no occlusion needed, but still clone to avoid reference issues
     if num_pixels_to_occlude == 0:
-        return images  # No need to clone if not modifying
+        return [img.clone() for img in images]
     
     # Ensure all images are on the same device (GPU for performance)
     device = DEVICE

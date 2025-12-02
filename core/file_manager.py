@@ -25,36 +25,83 @@ class FileManager:
         self.results_dir = self.base_dir / "results" / "evaluation"
         self.analysis_dir = self.base_dir / "results" / "analysis"
     
-    # ==================== Heatmap Paths ====================
+    # ==================== Heatmap Paths (Phase 1) ====================
     
     def get_heatmap_dir(self, dataset: str) -> Path:
         """Get directory for dataset heatmaps."""
         return self.heatmap_dir / dataset
     
-    def get_heatmap_path(
+    def get_sorted_heatmap_path(self, dataset: str, model: str, method: str, img_id: str) -> Path:
+        """Get path to sorted heatmap NPY file."""
+        return self.heatmap_dir / dataset / model / method / "sorted" / f"{model}-{method}-{img_id}.npy"
+    
+    def get_regular_heatmap_path(self, dataset: str, model: str, method: str, img_id: str) -> Path:
+        """Get path to regular heatmap PNG file."""
+        return self.heatmap_dir / dataset / model / method / "regular" / f"{model}-{method}-{img_id}.png"
+    
+    def check_sorted_heatmap_exists(self, dataset: str, model: str, method: str, img_id: str) -> bool:
+        """Check if sorted heatmap exists."""
+        return self.get_sorted_heatmap_path(dataset, model, method, img_id).exists()
+    
+    def check_regular_heatmap_exists(self, dataset: str, model: str, method: str, img_id: str) -> bool:
+        """Check if regular heatmap exists."""
+        return self.get_regular_heatmap_path(dataset, model, method, img_id).exists()
+    
+    def scan_sorted_heatmaps(self, dataset: str, model: str, method: str) -> List[Path]:
+        """Scan all sorted heatmap files for a model-method combination."""
+        sorted_dir = self.heatmap_dir / dataset / model / method / "sorted"
+        if not sorted_dir.exists():
+            return []
+        return list(sorted_dir.glob("*.npy"))
+    
+    # ==================== Occluded Image Paths (Phase 2) ====================
+    
+    def get_occluded_dir(self, dataset: str) -> Path:
+        """Get base directory for occluded images."""
+        return self.base_dir / "results" / "occluded" / dataset
+    
+    def get_occluded_image_path(
         self,
         dataset: str,
         model: str,
+        strategy: str,
         method: str,
-        img_id: str,
-        sorted: bool = False
+        level: int,
+        img_id: str
     ) -> Path:
         """
-        Get path to heatmap file.
+        Get path to occluded image.
         
-        Args:
-            dataset: Dataset name
-            model: Model name
-            method: Attribution method name
-            img_id: Image identifier
-            sorted: If True, returns path to sorted indices file
-            
-        Returns:
-            Path to heatmap or sorted indices file
+        Structure: results/occluded/{dataset}/{model}/{strategy}/{method}/{level}/{model}-{method}-{img_id}.png
         """
-        suffix = "_sorted" if sorted else ""
-        filename = f"{model}-{method}-{img_id}{suffix}.npy"
-        return self.get_heatmap_dir(dataset) / filename
+        filename = f"{model}-{method}-{img_id}.png"
+        return self.get_occluded_dir(dataset) / model / strategy / method / str(level) / filename
+    
+    def check_occluded_image_exists(
+        self,
+        dataset: str,
+        model: str,
+        strategy: str,
+        method: str,
+        level: int,
+        img_id: str
+    ) -> bool:
+        """Check if occluded image exists."""
+        return self.get_occluded_image_path(dataset, model, strategy, method, level, img_id).exists()
+    
+    def scan_occluded_images(
+        self,
+        dataset: str,
+        model: str,
+        strategy: str,
+        method: str,
+        level: int
+    ) -> List[Path]:
+        """Scan all occluded images for a specific combination."""
+        level_dir = self.get_occluded_dir(dataset) / model / strategy / method / str(level)
+        if not level_dir.exists():
+            return []
+        return list(level_dir.glob("*.png"))
     
     # ==================== Result File Paths ====================
     

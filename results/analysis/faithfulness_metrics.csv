@@ -1,6 +1,0 @@
-dataset,generating_model,attribution_method,judging_model,fill_strategy,auc,drop_at_75
-imagenet,resnet50,grad_cam,llama3.2-vision-binary,mean,0.016125,
-imagenet,resnet50,grad_cam,mobilenet_v2,gray,0.08088000000000001,0.534
-imagenet,resnet50,inputxgradient,mobilenet_v2,gray,0.00425,0.973
-imagenet,resnet50,occlusion,mobilenet_v2,gray,0.02299,0.846
-imagenet,resnet50,random_baseline,mobilenet_v2,gray,0.0007050000000000001,0.996

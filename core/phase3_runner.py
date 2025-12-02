@@ -1,218 +1,666 @@
 """
-Phase 3: Analysis and Visualization Runner.
+Phase 3: Super-Fast Evaluation Runner.
 
-Loads Phase 2 results, calculates metrics (AUC, DROP), and generates visualization plots.
+Loads pre-generated occluded images from Phase 2 and tests them with judging models.
+NO image generation - only loading and testing for maximum efficiency.
 """
 
+import numpy as np
+import torch
 import logging
-import pandas as pd
+import time
+from pathlib import Path
+from tqdm import tqdm
+from typing import Dict, Any, List, Tuple, Set
+from collections import defaultdict
+from PIL import Image
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
+from core.gpu_manager import GPUManager
 from core.file_manager import FileManager
-from evaluation.metrics import calculate_auc, calculate_drop
-from visualization.plotter import plot_accuracy_degradation_curves, plot_fill_strategy_comparison
+from core.gpu_utils import prepare_batch_tensor
+from core.phase1_runner import Phase1Runner
+from core.phase2_runner import Phase2Runner
+from data.loader import get_dataloader, get_default_transforms
+from evaluation.judging.base import JudgingModel
+from evaluation.judging.base_llm_judge import MAX_PARALLEL_WORKERS
 
 
 class Phase3Runner:
-    """Handles Phase 3: Analysis and visualization of evaluation results."""
+    """Handles Phase 3: Super-fast evaluation of pre-generated occluded images."""
     
-    def __init__(self, config, file_manager: FileManager):
-        """
-        Initialize Phase 3 runner.
-        
-        Args:
-            config: Configuration object
-            file_manager: File path manager
-        """
+    def __init__(
+        self,
+        config,
+        gpu_manager: GPUManager,
+        file_manager: FileManager,
+        model_cache: Dict[str, Any]
+    ):
         self.config = config
+        self.gpu_manager = gpu_manager
         self.file_manager = file_manager
+        self.model_cache = model_cache
+        self.transform = get_default_transforms()
+        self.load_workers = getattr(config, 'PHASE3_LOAD_WORKERS', 8)
+        self.csv_locks = {}
     
-    def run(self):
-        """Run analysis and visualization on Phase 2 results."""
-        try:
-            # Check if results directory exists
-            if not self.file_manager.results_dir.exists():
-                logging.error(f"Results directory does not exist: {self.file_manager.results_dir}")
-                return
-            
-            # Find all datasets with results
-            datasets = [
-                d.name for d in self.file_manager.results_dir.iterdir()
-                if d.is_dir() and not d.name.startswith('.')
-            ]
-            
-            if not datasets:
-                logging.error("No result datasets found")
-                return
-            
-            logging.info(f"Starting Phase 3 - Analyzing: {', '.join(datasets)}")
-            
-            # Load all results from file structure
-            all_data = self._load_all_results(datasets)
-            
-            if not all_data:
-                logging.warning("No results data found")
-                return
-            
-            # Create DataFrame and calculate aggregated accuracy
-            df = pd.DataFrame(all_data)
-            agg_df = self._calculate_aggregated_accuracy(df)
-            
-            # Calculate metrics (AUC, DROP)
-            metrics_df = self._calculate_metrics(agg_df)
-            
-            # Save results
-            self._save_results(agg_df, metrics_df)
-            
-            # Generate plots per dataset
-            self._generate_plots(agg_df, datasets)
-            
-            logging.info(f"Phase 3 complete! Results → {self.file_manager.analysis_dir}")
-        except Exception as e:
-            logging.error(f"Phase 3 failed: {e}")
-            raise
+    def run(self, get_cached_model_func):
+        """Evaluate pre-generated occluded images with judging models."""
+        dataset_name = self.config.DATASET_NAME
+        
+        if dataset_name not in self.config.DATASET_CONFIG:
+            raise ValueError(
+                f"Dataset '{dataset_name}' not found in DATASET_CONFIG. "
+                f"Available datasets: {list(self.config.DATASET_CONFIG.keys())}"
+            )
+        
+        logging.info(f"Starting Phase 3 - Dataset: {dataset_name}")
+        
+        self._ensure_phase2_complete(dataset_name, get_cached_model_func)
+        image_label_map = self._load_dataset_labels(dataset_name)
+        judging_models = self._load_judging_models(get_cached_model_func)
+        
+        total_combinations = (
+            len(self.config.GENERATING_MODELS) *
+            len(self.config.ATTRIBUTION_METHODS) *
+            len(self.config.FILL_STRATEGIES) *
+            len(self.config.JUDGING_MODELS)
+        )
+        
+        with tqdm(total=total_combinations, desc="Phase 3 Progress") as pbar:
+            for gen_model in self.config.GENERATING_MODELS:
+                for method in self.config.ATTRIBUTION_METHODS:
+                    for strategy in self.config.FILL_STRATEGIES:
+                        for judge_name in self.config.JUDGING_MODELS:
+                            if judge_name == gen_model:
+                                pbar.update(1)
+                                continue
+                            
+                            pbar.set_description(
+                                f"{gen_model[:12]}/{method[:12]}/{strategy}/{judge_name[:12]}"
+                            )
+                            
+                            try:
+                                self._evaluate_combination(
+                                    dataset_name, gen_model, method, strategy,
+                                    judge_name, judging_models[judge_name],
+                                    image_label_map
+                                )
+                            except Exception as e:
+                                logging.error(
+                                    f"Error: {gen_model}-{method}-{strategy}-{judge_name}: {e}"
+                                )
+                            finally:
+                                pbar.update(1)
+        
+        logging.info(f"Phase 3 complete! Results saved to: {self.file_manager.get_result_dir(dataset_name)}")
     
-    def _load_all_results(self, datasets):
-        """
-        Load all result CSV files from Phase 2.
+    def _ensure_phase2_complete(self, dataset_name: str, get_cached_model_func):
+        """Check if Phase 2 is complete, run it for missing items if needed."""
+        batch_size = getattr(self.config, 'PHASE2_BATCH_SIZE', 128)
+        dataloader = get_dataloader(dataset_name, batch_size=batch_size, shuffle=False)
+        total_images = len(dataloader.dataset)
         
-        Args:
-            datasets: List of dataset names
-            
-        Returns:
-            List of dictionaries containing result data
-        """
-        all_data = []
+        missing_items = []
+        for model_name in self.config.GENERATING_MODELS:
+            for method_name in self.config.ATTRIBUTION_METHODS:
+                for strategy in self.config.FILL_STRATEGIES:
+                    for level in self.config.OCCLUSION_LEVELS:
+                        occluded_images = self.file_manager.scan_occluded_images(
+                            dataset_name, model_name, strategy, method_name, level
+                        )
+                        if len(occluded_images) < total_images:
+                            missing_items.append((model_name, method_name, strategy, level))
+                            break
         
-        for dataset in datasets:
-            result_files = self.file_manager.scan_result_files(dataset)
-            
-            for result_file in result_files:
-                # Parse file path to get parameters
-                params = self.file_manager.parse_result_file_path(result_file, dataset)
-                if not params:
+        if missing_items:
+            logging.info(f"Running Phase 2 for {len(missing_items)} missing combinations...")
+            phase2 = Phase2Runner(self.config, self.gpu_manager, self.file_manager, self.model_cache)
+            phase2.run(get_cached_model_func)
+    
+    def _load_dataset_labels(self, dataset_name: str) -> Dict[str, int]:
+        """Load dataset and create image ID to label mapping."""
+        batch_size = getattr(self.config, 'PHASE3_BATCH_SIZE_PYTORCH', 256)
+        dataloader = get_dataloader(dataset_name, batch_size=batch_size, shuffle=False)
+        image_label_map = {}
+        global_idx = 0
+        
+        for batch_images, batch_labels in dataloader:
+            for lbl in batch_labels:
+                image_label_map[f"image_{global_idx:05d}"] = lbl.item()
+                global_idx += 1
+        
+        return image_label_map
+    
+    def _load_judging_models(self, get_cached_model_func) -> Dict[str, Any]:
+        """Load judging models."""
+        judging_models = {
+            name: get_cached_model_func(name) for name in self.config.JUDGING_MODELS
+        }
+        
+        if self.config.USE_FP16_INFERENCE and self.config.DEVICE == "cuda" and self.gpu_manager.supports_fp16():
+            for name, model in judging_models.items():
+                if isinstance(model, JudgingModel):
                     continue
-                
-                # Load CSV data
-                rows = self.file_manager.load_csv(result_file, skip_header=True)
-                
-                # Add metadata to each row
-                for row in rows:
-                    if len(row) >= 3:
-                        try:
-                            all_data.append({
-                                'dataset': dataset,
-                                'generating_model': params['gen_model'],
-                                'attribution_method': params['method'],
-                                'judging_model': params['judge_model'],
-                                'fill_strategy': params['strategy'],
-                                'image_id': row[0],
-                                'occlusion_level': float(row[1]),
-                                'is_correct': int(row[2])
-                            })
-                        except (ValueError, TypeError) as e:
-                            logging.warning(f"Skipping corrupted row in {result_file}: {row} - {e}")
-                            continue
+                try:
+                    judging_models[name] = model.half()
+                    logging.debug(f"Converted {name} to FP16 for Phase 3 inference")
+                except Exception as e:
+                    logging.warning(f"Failed to convert {name} to FP16, using FP32: {e}")
         
-        return all_data
+        return judging_models
     
-    def _calculate_aggregated_accuracy(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Calculate mean accuracy aggregated by grouping columns.
+    def _evaluate_combination(
+        self,
+        dataset_name: str,
+        gen_model: str,
+        method: str,
+        strategy: str,
+        judge_name: str,
+        judge_model: Any,
+        image_label_map: Dict[str, int]
+    ):
+        """Evaluate a specific combination (gen_model × method × strategy × judge)."""
+        result_file = self.file_manager.get_result_file_path(
+            dataset_name, gen_model, judge_name, method, strategy
+        )
+        completed_items = self._load_completed_items(result_file)
         
-        Args:
-            df: DataFrame with result data
+        # Initialize tracking variables
+        results_by_level = defaultdict(list)
+        saved_results = set()
+        items_since_save = 0
+        last_save_time = time.time()
+        save_interval_items = 100
+        save_interval_seconds = 30
+        
+        # Count total images and create progress bar
+        total_images_to_process = self._count_images_to_process(
+            dataset_name, gen_model, method, strategy, completed_items, image_label_map
+        )
+        
+        inner_pbar = None
+        processed_count = 0
+        start_time = time.time()
+        if total_images_to_process > 0:
+            inner_pbar = tqdm(
+                total=total_images_to_process,
+                desc=f"  → {gen_model[:10]}/{method[:10]}/{strategy[:8]}/{judge_name[:10]}",
+                leave=False,
+                unit="img",
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:3.0f}%] {elapsed}<{remaining}'
+            )
+        
+        # Process each occlusion level
+        is_llm_judge = isinstance(judge_model, JudgingModel)
+        for level in self.config.OCCLUSION_LEVELS:
+            completed_items = self._load_completed_items(result_file)
+            images_to_process, labels_to_process = self._filter_images_to_process(
+                dataset_name, gen_model, method, strategy, level,
+                completed_items, saved_results, image_label_map
+            )
             
-        Returns:
-            DataFrame with aggregated accuracy
-        """
-        group_cols = [
-            "dataset", "generating_model", "attribution_method",
-            "judging_model", "fill_strategy", "occlusion_level"
-        ]
-        agg_df = df.groupby(group_cols)['is_correct'].mean().reset_index()
-        agg_df.rename(columns={'is_correct': 'mean_accuracy'}, inplace=True)
-        return agg_df
-    
-    def _calculate_metrics(self, agg_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Calculate faithfulness metrics (AUC, DROP) for each curve.
-        
-        Args:
-            agg_df: DataFrame with aggregated accuracy
-            
-        Returns:
-            DataFrame with calculated metrics
-        """
-        metrics_list = []
-        curve_group_cols = [
-            "dataset", "generating_model", "attribution_method",
-            "judging_model", "fill_strategy"
-        ]
-        
-        for name, curve_df in agg_df.groupby(curve_group_cols):
-            try:
-                dataset, gen_model, method, judge_model, fill_strat = name
-                
-                # Get baseline accuracy (at 0% occlusion)
-                baseline_acc = 1.0
-                if 0 in curve_df['occlusion_level'].values:
-                    baseline_acc = curve_df[curve_df['occlusion_level'] == 0]['mean_accuracy'].iloc[0]
-                
-                accuracies = curve_df['mean_accuracy'].tolist()
-                levels = curve_df['occlusion_level'].tolist()
-                
-                # Calculate metrics
-                auc = calculate_auc(accuracies, levels)
-                drop75 = calculate_drop(accuracies, levels, initial_accuracy=baseline_acc, drop_level=75)
-                
-                metrics_list.append({
-                    "dataset": dataset,
-                    "generating_model": gen_model,
-                    "attribution_method": method,
-                    "judging_model": judge_model,
-                    "fill_strategy": fill_strat,
-                    "auc": auc,
-                    "drop_at_75": drop75
-                })
-            except Exception as e:
-                logging.warning(f"Error calculating metrics for {name}: {e}")
+            if not images_to_process:
                 continue
+            
+            if is_llm_judge:
+                items_since_save, last_save_time, processed_count = self._evaluate_llm_level(
+                    judge_model, images_to_process, labels_to_process, level,
+                    gen_model, method, results_by_level, saved_results,
+                    completed_items, result_file, inner_pbar,
+                    processed_count, start_time, total_images_to_process,
+                    items_since_save, last_save_time, save_interval_items, save_interval_seconds
+                )
+            else:
+                items_since_save, last_save_time, processed_count = self._evaluate_pytorch_level(
+                    judge_model, images_to_process, labels_to_process, level,
+                    gen_model, method, results_by_level, saved_results,
+                    completed_items, result_file, inner_pbar,
+                    processed_count, start_time, total_images_to_process,
+                    items_since_save, last_save_time, save_interval_items, save_interval_seconds
+                )
         
-        return pd.DataFrame(metrics_list)
+        # Final save and cleanup
+        if results_by_level:
+            self._save_results(results_by_level, result_file)
+        if inner_pbar is not None:
+            inner_pbar.close()
     
-    def _save_results(self, agg_df: pd.DataFrame, metrics_df: pd.DataFrame):
-        """
-        Save aggregated results and metrics to CSV files.
-        
-        Args:
-            agg_df: DataFrame with aggregated accuracy
-            metrics_df: DataFrame with calculated metrics
-        """
-        agg_output_path = self.file_manager.analysis_dir / "aggregated_accuracy_curves.csv"
-        metrics_output_path = self.file_manager.analysis_dir / "faithfulness_metrics.csv"
-        
-        agg_df.to_csv(agg_output_path, index=False)
-        metrics_df.to_csv(metrics_output_path, index=False)
+    def _count_images_to_process(
+        self,
+        dataset_name: str,
+        gen_model: str,
+        method: str,
+        strategy: str,
+        completed_items: Set[Tuple[str, float]],
+        image_label_map: Dict[str, int]
+    ) -> int:
+        """Count total images that need processing."""
+        total = 0
+        for level in self.config.OCCLUSION_LEVELS:
+            occluded_images = self.file_manager.scan_occluded_images(
+                dataset_name, gen_model, strategy, method, level
+            )
+            for img_path in occluded_images:
+                img_id = img_path.stem.replace(f"{gen_model}-{method}-", "")
+                if (img_id, level) not in completed_items and img_id in image_label_map:
+                    total += 1
+        return total
     
-    def _generate_plots(self, agg_df: pd.DataFrame, datasets):
-        """
-        Generate visualization plots for each dataset.
+    def _filter_images_to_process(
+        self,
+        dataset_name: str,
+        gen_model: str,
+        method: str,
+        strategy: str,
+        level: int,
+        completed_items: Set[Tuple[str, float]],
+        saved_results: Set[Tuple[str, float]],
+        image_label_map: Dict[str, int]
+    ) -> Tuple[List[Path], List[int]]:
+        """Filter images that need processing for a specific level."""
+        occluded_images = self.file_manager.scan_occluded_images(
+            dataset_name, gen_model, strategy, method, level
+        )
         
-        Args:
-            agg_df: DataFrame with aggregated accuracy
-            datasets: List of dataset names
-        """
-        for dataset in datasets:
-            dataset_df = agg_df[agg_df['dataset'] == dataset].copy()
-            if not dataset_df.empty:
-                # Create dataset-specific output directory
-                dataset_analysis_dir = self.file_manager.analysis_dir / dataset
-                self.file_manager.ensure_dir_exists(dataset_analysis_dir)
+        images_to_process = []
+        labels_to_process = []
+        
+        for img_path in occluded_images:
+            img_id = img_path.stem.replace(f"{gen_model}-{method}-", "")
+            result_key = (img_id, level)
+            
+            if result_key in completed_items or result_key in saved_results:
+                continue
+            if img_id not in image_label_map:
+                continue
+            
+            images_to_process.append(img_path)
+            labels_to_process.append(image_label_map[img_id])
+        
+        return images_to_process, labels_to_process
+    
+    def _evaluate_llm_level(
+        self,
+        judge_model: Any,
+        images_to_process: List[Path],
+        labels_to_process: List[int],
+        level: int,
+        gen_model: str,
+        method: str,
+        results_by_level: Dict,
+        saved_results: Set,
+        completed_items: Set,
+        result_file: Path,
+        inner_pbar: tqdm,
+        processed_count: int,
+        start_time: float,
+        total_images_to_process: int,
+        items_since_save: int,
+        last_save_time: float,
+        save_interval_items: int,
+        save_interval_seconds: float
+    ) -> Tuple[int, float, int]:
+        """Evaluate a level using LLM judge (optimized pipeline processing)."""
+        batch_size = getattr(self.config, 'PHASE3_BATCH_SIZE_LLM', 32)
+        shared_executor = ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS)
+        
+        try:
+            # Submit all batches immediately
+            batch_futures = []
+            for i in range(0, len(images_to_process), batch_size):
+                end_idx = min(i + batch_size, len(images_to_process))
+                batch_paths = images_to_process[i:end_idx]
+                batch_labels = labels_to_process[i:end_idx]
                 
-                plot_accuracy_degradation_curves(
-                    dataset_df, output_dir=dataset_analysis_dir
+                future = shared_executor.submit(
+                    judge_model.predict_from_paths,
+                    [str(path) for path in batch_paths],
+                    batch_labels,
+                    shared_executor=shared_executor
                 )
-                plot_fill_strategy_comparison(
-                    dataset_df, output_dir=dataset_analysis_dir
+                batch_futures.append((future, batch_paths, batch_labels, i // batch_size))
+            
+            # Process batches as they complete
+            batch_results = {}
+            future_to_batch = {
+                future: (batch_paths, batch_labels, batch_idx)
+                for future, batch_paths, batch_labels, batch_idx in batch_futures
+            }
+            
+            for future in as_completed(future_to_batch.keys()):
+                batch_paths, batch_labels, batch_idx = future_to_batch[future]
+                try:
+                    predictions = future.result()
+                    batch_results[batch_idx] = (predictions, batch_paths, batch_labels)
+                except Exception as e:
+                    logging.error(f"Error processing batch {batch_idx}: {e}")
+                    predictions = np.array([-1] * len(batch_paths), dtype=np.int64)
+                    batch_results[batch_idx] = (predictions, batch_paths, batch_labels)
+            
+            # Record results in order
+            for batch_idx in sorted(batch_results.keys()):
+                predictions, batch_paths, batch_labels = batch_results[batch_idx]
+                items_since_save, last_save_time, processed_count = self._record_batch_results(
+                    predictions, batch_paths, batch_labels, level, gen_model, method,
+                    results_by_level, saved_results, completed_items, result_file,
+                    inner_pbar, processed_count, start_time, total_images_to_process,
+                    items_since_save, last_save_time, save_interval_items, save_interval_seconds
                 )
+        finally:
+            shared_executor.shutdown(wait=False)
+        
+        return items_since_save, last_save_time, processed_count
+    
+    def _evaluate_pytorch_level(
+        self,
+        judge_model: Any,
+        images_to_process: List[Path],
+        labels_to_process: List[int],
+        level: int,
+        gen_model: str,
+        method: str,
+        results_by_level: Dict,
+        saved_results: Set,
+        completed_items: Set,
+        result_file: Path,
+        inner_pbar: tqdm,
+        processed_count: int,
+        start_time: float,
+        total_images_to_process: int,
+        items_since_save: int,
+        last_save_time: float,
+        save_interval_items: int,
+        save_interval_seconds: float
+    ) -> Tuple[int, float, int]:
+        """Evaluate a level using PyTorch model (with prefetching)."""
+        batch_size = getattr(self.config, 'PHASE3_BATCH_SIZE_PYTORCH', 512)
+        next_batch_images = None
+        next_batch_paths = None
+        next_batch_labels = None
+        next_future = None
+        
+        for i in range(0, len(images_to_process), batch_size):
+            end_idx = min(i + batch_size, len(images_to_process))
+            batch_paths = images_to_process[i:end_idx]
+            batch_labels = labels_to_process[i:end_idx]
+            
+            # Use prefetched batch if available
+            if next_batch_images is not None:
+                batch_images = next_batch_images
+                batch_paths = next_batch_paths
+                batch_labels = next_batch_labels
+            else:
+                batch_images = self._load_images_batch(batch_paths)
+            
+            # Prefetch next batch
+            if i + batch_size < len(images_to_process):
+                next_end_idx = min(i + batch_size * 2, len(images_to_process))
+                next_batch_paths = images_to_process[i + batch_size:next_end_idx]
+                next_batch_labels = labels_to_process[i + batch_size:next_end_idx]
+                if self.load_workers > 1:
+                    executor = ThreadPoolExecutor(max_workers=1)
+                    next_future = executor.submit(self._load_images_batch, next_batch_paths)
+                else:
+                    next_future = None
+            else:
+                next_future = None
+            
+            # Evaluate batch
+            predictions = self._evaluate_batch(batch_images, judge_model, batch_labels)
+            
+            # Get prefetched batch if ready
+            if next_future is not None:
+                next_batch_images = next_future.result()
+                executor.shutdown(wait=False)
+            else:
+                next_batch_images = None
+            
+            # Memory cleanup
+            del batch_images
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            # Record results
+            items_since_save, last_save_time, processed_count = self._record_batch_results(
+                predictions, batch_paths, batch_labels, level, gen_model, method,
+                results_by_level, saved_results, completed_items, result_file,
+                inner_pbar, processed_count, start_time, total_images_to_process,
+                items_since_save, last_save_time, save_interval_items, save_interval_seconds
+            )
+        
+        return items_since_save, last_save_time, processed_count
+    
+    def _record_batch_results(
+        self,
+        predictions: np.ndarray,
+        batch_paths: List[Path],
+        batch_labels: List[int],
+        level: int,
+        gen_model: str,
+        method: str,
+        results_by_level: Dict,
+        saved_results: Set,
+        completed_items: Set,
+        result_file: Path,
+        inner_pbar: tqdm,
+        processed_count: int,
+        start_time: float,
+        total_images_to_process: int,
+        items_since_save: int,
+        last_save_time: float,
+        save_interval_items: int,
+        save_interval_seconds: float
+    ) -> Tuple[int, float, int]:
+        """Record results for a batch and handle periodic saves."""
+        # Process all images in batch
+        for j, (pred, true_label) in enumerate(zip(predictions, batch_labels)):
+            img_id = batch_paths[j].stem.replace(f"{gen_model}-{method}-", "")
+            if not img_id:
+                img_id = batch_paths[j].stem
+            
+            result_key = (img_id, level)
+            if result_key in completed_items or result_key in saved_results:
+                continue
+            
+            is_correct = 1 if pred == true_label else 0
+            if pred < 0:
+                is_correct = 0
+            
+            result_row = [img_id, level, is_correct]
+            results_by_level[level].append(result_row)
+            saved_results.add(result_key)
+            items_since_save += 1
+            
+            # Update progress bar
+            if inner_pbar is not None:
+                inner_pbar.update(1)
+                processed_count += 1
+                if processed_count > 10:
+                    elapsed = time.time() - start_time
+                    rate = processed_count / elapsed if elapsed > 0 else 0
+                    if rate > 0:
+                        remaining = (total_images_to_process - processed_count) / rate
+                        inner_pbar.set_postfix({'ETA': f'{remaining:.0f}s', 'rate': f'{rate:.1f} img/s'})
+        
+        # Periodic save - check once after processing entire batch (more efficient)
+        current_time = time.time()
+        time_since_last_save = current_time - last_save_time
+        if items_since_save >= save_interval_items or time_since_last_save >= save_interval_seconds:
+            if results_by_level:
+                self._save_results(results_by_level, result_file)
+                completed_items.update(self._load_completed_items(result_file))
+                completed_items.update(saved_results)
+                items_since_save = 0
+                last_save_time = current_time
+                results_by_level.clear()
+                saved_results.clear()
+        
+        return items_since_save, last_save_time, processed_count
+    
+    def _load_single_image(self, img_path: Path) -> torch.Tensor:
+        """Load a single image and convert to tensor."""
+        pil_image = Image.open(img_path).convert("RGB")
+        return self.transform(pil_image)
+    
+    def _load_images_batch(self, image_paths: List[Path]) -> List[torch.Tensor]:
+        """Load images from disk and convert to tensors (parallel loading)."""
+        if len(image_paths) == 1:
+            return [self._load_single_image(image_paths[0])]
+        
+        if self.load_workers > 1:
+            with ThreadPoolExecutor(max_workers=self.load_workers) as executor:
+                futures = {
+                    executor.submit(self._load_single_image, img_path): idx
+                    for idx, img_path in enumerate(image_paths)
+                }
+                images = [None] * len(image_paths)
+                for future in as_completed(futures):
+                    idx = futures[future]
+                    images[idx] = future.result()
+        else:
+            images = [self._load_single_image(img_path) for img_path in image_paths]
+        
+        return images
+    
+    def _evaluate_batch(
+        self,
+        batch_images: List[torch.Tensor],
+        judge_model: Any,
+        batch_labels: List[int] = None
+    ) -> np.ndarray:
+        """Evaluate a batch of images with the judging model."""
+        try:
+            if isinstance(judge_model, JudgingModel):
+                batch_images_cpu = []
+                has_gpu_images = False
+                for img in batch_images:
+                    if img.is_cuda:
+                        has_gpu_images = True
+                        batch_images_cpu.append(img.detach().cpu())
+                    else:
+                        batch_images_cpu.append(img)
+                
+                if has_gpu_images:
+                    torch.cuda.synchronize()
+                
+                if batch_labels is not None:
+                    return judge_model.predict(batch_images_cpu, true_labels=batch_labels)
+                else:
+                    return judge_model.predict(batch_images_cpu)
+            
+            # PyTorch models
+            batch_tensor = prepare_batch_tensor(
+                batch_images,
+                self.config.DEVICE,
+                use_fp16=self.config.USE_FP16_INFERENCE,
+                memory_format=torch.channels_last
+            )
+            
+            with torch.inference_mode():
+                if self.config.DEVICE == "cuda" and self.config.USE_FP16_INFERENCE:
+                    with torch.amp.autocast(self.config.DEVICE, dtype=torch.float16):
+                        outputs = judge_model(batch_tensor)
+                elif self.config.DEVICE == "cuda":
+                    with torch.amp.autocast(self.config.DEVICE):
+                        outputs = judge_model(batch_tensor)
+                else:
+                    outputs = judge_model(batch_tensor)
+                
+                if isinstance(outputs, tuple):
+                    outputs = outputs[0]
+                if isinstance(outputs, dict):
+                    outputs = outputs.get('logits', outputs)
+                
+                predictions_tensor = torch.argmax(outputs, dim=1)
+                predictions = predictions_tensor.cpu().numpy()
+            
+            del batch_tensor
+            return predictions
+            
+        except Exception as e:
+            logging.warning(f"Batch evaluation error: {e}")
+            return np.array([-1] * len(batch_images), dtype=np.int64)
+    
+    def _load_completed_items(self, result_file: Path) -> Set[Tuple[str, float]]:
+        """Load already completed items from CSV file (thread-safe)."""
+        if not result_file.exists():
+            return set()
+        
+        lock = self._get_csv_lock(result_file)
+        with lock:
+            rows = self.file_manager.load_csv(result_file, skip_header=True)
+        
+        completed = set()
+        for row in rows:
+            if len(row) >= 2:
+                try:
+                    img_id = row[0]
+                    occlusion_level = float(row[1])
+                    completed.add((img_id, occlusion_level))
+                except (ValueError, IndexError):
+                    continue
+        
+        return completed
+    
+    def _get_csv_lock(self, result_file: Path) -> Lock:
+        """Get or create a lock for a specific CSV file."""
+        file_str = str(result_file)
+        if file_str not in self.csv_locks:
+            self.csv_locks[file_str] = Lock()
+        return self.csv_locks[file_str]
+    
+    def _save_results(self, results_by_level: Dict, result_file: Path):
+        """Save results to CSV file (thread-safe)."""
+        all_results = []
+        for level in sorted(results_by_level.keys()):
+            all_results.extend(results_by_level[level])
+        
+        if not all_results:
+            return
+        
+        header = ["image_id", "occlusion_level", "is_correct"]
+        lock = self._get_csv_lock(result_file)
+        with lock:
+            self.file_manager.save_csv(
+                result_file, all_results, header=header, append=result_file.exists()
+            )
 
+
+def main():
+    """Simple main function to run Phase 3."""
+    import sys
+    import logging
+    from pathlib import Path
+    
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    import config
+    from core.gpu_manager import GPUManager
+    from core.file_manager import FileManager
+    from models.loader import load_model
+    from evaluation.judging.binary_llm_judge import BinaryLLMJudge
+    from evaluation.judging.cosine_llm_judge import CosineSimilarityLLMJudge
+    
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    
+    gpu_manager = GPUManager()
+    file_manager = FileManager(config.BASE_DIR)
+    model_cache = {}
+    
+    def get_cached_model(name):
+        if name not in model_cache:
+            if name.endswith('-binary'):
+                model_cache[name] = BinaryLLMJudge(name, config.DATASET_NAME, 0.0)
+            elif name.endswith('-cosine'):
+                model_cache[name] = CosineSimilarityLLMJudge(name, config.DATASET_NAME, 0.1, 0.8, "nomic-embed-text")
+            else:
+                model_cache[name] = load_model(name)
+        return model_cache[name]
+    
+    runner = Phase3Runner(config, gpu_manager, file_manager, model_cache)
+    runner.run(get_cached_model)
+
+
+if __name__ == "__main__":
+    main()
