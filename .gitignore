@@ -11,3 +11,4 @@ results/heatmaps
 /results/evaluation
 *.pyc
 */__pycache__/
+/test/results

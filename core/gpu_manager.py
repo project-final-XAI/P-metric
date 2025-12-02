@@ -164,11 +164,11 @@ class GPUManager:
         """
         # Base batch sizes by total GPU memory
         if self.gpu_memory_gb >= 22:
-            base_size = 768   # Very high-VRAM GPUs
+            base_size = 512   # Very high-VRAM GPUs
         elif self.gpu_memory_gb >= 16:
-            base_size = 512   # High-VRAM GPUs
+            base_size = 384   # High-VRAM GPUs
         elif self.gpu_memory_gb > 8:
-            base_size = 256   # Mid-range GPUs
+            base_size = 256   # Mid-VRAM GPUs
         else:
             base_size = 64    # Low-VRAM GPUs
         
@@ -179,11 +179,15 @@ class GPUManager:
         if current_memory_usage is None:
             _, current_memory_usage = self.get_memory_usage()
         
-        memory_multiplier = 1.0
-        for threshold, multiplier in self._MEMORY_USAGE_MULTIPLIERS:
-            if current_memory_usage < threshold:
-                memory_multiplier = multiplier
-                break
+        # If VRAM is full (95%+), reduce significantly  
+        if current_memory_usage >= 95.0:
+            memory_multiplier = 0.1  # Reduce to 10% of the original size
+        else:
+            memory_multiplier = 1.0
+            for threshold, multiplier in self._MEMORY_USAGE_MULTIPLIERS:
+                if current_memory_usage < threshold:
+                    memory_multiplier = multiplier
+                    break
         
         # Calculate final batch size with cap
         final_size = int(base_size * memory_multiplier)

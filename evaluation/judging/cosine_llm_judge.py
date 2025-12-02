@@ -28,14 +28,14 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
     the response and class names. Returns the class with highest similarity
     if above threshold.
     """
-    
+
     def __init__(
-        self,
-        model_name: str,
-        dataset_name: str = "imagenet",
-        temperature: float = 0.1,
-        similarity_threshold: float = 0.8,
-        embedding_model: str = "nomic-embed-text"
+            self,
+            model_name: str,
+            dataset_name: str = "imagenet",
+            temperature: float = 0.1,
+            similarity_threshold: float = 0.8,
+            embedding_model: str = "nomic-embed-text"
     ):
         """
         Initialize Cosine Similarity LLM Judge.
@@ -52,15 +52,23 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
         self.similarity_threshold = similarity_threshold
         self.embedding_model = embedding_model
         
+        # Extract actual Ollama model name (remove -binary/-cosine suffix)
+        # e.g., "llama3.2-vision-cosine" -> "llama3.2-vision"
+        if model_name.endswith('-binary'):
+            self.ollama_model_name = model_name[:-7]  # Remove '-binary'
+        elif model_name.endswith('-cosine'):
+            self.ollama_model_name = model_name[:-7]  # Remove '-cosine'
+        else:
+            self.ollama_model_name = model_name
+
         # Load or compute class name embeddings
         self.class_embeddings = self._load_or_compute_embeddings()
-        
+
         logging.info(
             f"CosineSimilarityLLMJudge initialized: {len(self.class_names)} classes, "
             f"threshold={similarity_threshold}, temperature={temperature}"
         )
-    
-    
+
     def _load_or_compute_embeddings(self) -> np.ndarray:
         """
         Load embeddings from cache or compute if not cached.
@@ -71,10 +79,10 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
         # Create cache directory
         cache_dir = Path(".cache")
         cache_dir.mkdir(exist_ok=True)
-        
+
         # Cache file path
         cache_file = cache_dir / f"embeddings_{self.dataset_name}_{self.embedding_model.replace('/', '_')}.npy"
-        
+
         # Try to load from cache
         if cache_file.exists():
             try:
@@ -83,20 +91,20 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
                 return embeddings
             except Exception as e:
                 logging.warning(f"Failed to load cached embeddings: {e}. Recomputing...")
-        
+
         # Compute fresh embeddings
         logging.info(f"Computing embeddings for {len(self.class_names)} classes (this may take 2-3 minutes)...")
         embeddings = self._compute_class_embeddings()
-        
+
         # Save to cache
         try:
             np.save(cache_file, embeddings)
             logging.info(f"Saved embeddings to cache: {cache_file}")
         except Exception as e:
             logging.warning(f"Failed to save embeddings to cache: {e}")
-        
+
         return embeddings
-    
+
     def _compute_class_embeddings(self) -> np.ndarray:
         """
         Pre-compute embeddings for all class names.
@@ -105,36 +113,36 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
             Array of embeddings (shape: [num_classes, embedding_dim])
         """
         formatted_names = [self._format_class_name(name) for name in self.class_names]
-        
+
         try:
             # Use Ollama's embedding API
             embeddings = []
-            
+
             # Process in batches for efficiency
             batch_size = 100
             for i in range(0, len(formatted_names), batch_size):
                 batch = formatted_names[i:i + batch_size]
-                
+
                 for text in batch:
                     response = ollama.embeddings(
                         model=self.embedding_model,
                         prompt=text
                     )
                     embeddings.append(response['embedding'])
-            
+
             embeddings = np.array(embeddings, dtype=np.float32)
-            
+
             # Normalize embeddings for cosine similarity
             norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
             embeddings = embeddings / (norms + 1e-8)
-            
+
             return embeddings
-        
+
         except Exception as e:
             logging.error(f"Failed to compute embeddings: {e}")
             logging.error(f"Make sure Ollama embedding model '{self.embedding_model}' is available")
             raise
-    
+
     def _get_embedding(self, text: str) -> np.ndarray:
         """
         Get embedding for a text string.
@@ -151,51 +159,72 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
                 prompt=text
             )
             embedding = np.array(response['embedding'], dtype=np.float32)
-            
+
             # Normalize
             norm = np.linalg.norm(embedding)
             embedding = embedding / (norm + 1e-8)
-            
+
             return embedding
         except Exception as e:
             logging.error(f"Failed to get embedding: {e}")
             return None
-    
-    def _compute_similarity(self, response_text: str) -> Tuple[int, float]:
+
+    def _compute_similarity_to_class(self, response_embedding: np.ndarray, true_label: int) -> float:
         """
-        Compute similarity between response and all class names.
+        Compute cosine similarity between LLM response embedding and the true class name.
         
         Args:
-            response_text: LLM response text
+            response_embedding: Pre-computed embedding for the response text
+            true_label: True class label index
+            
+        Returns:
+            Cosine similarity score (0.0-1.0), or 0.0 if invalid label
+        """
+        # Validate true_label
+        if true_label < 0 or true_label >= len(self.class_embeddings):
+            logging.warning(f"Invalid true_label {true_label} (valid range: 0-{len(self.class_embeddings)-1})")
+            return 0.0
+        
+        # Compute cosine similarity only with the true class
+        true_class_embedding = self.class_embeddings[true_label]
+        similarity = np.dot(true_class_embedding, response_embedding)
+        
+        return float(similarity)
+
+    def _compute_similarity(self, response_embedding: np.ndarray) -> Tuple[int, float]:
+        """
+        Compute similarity between response embedding and all class names.
+        
+        Args:
+            response_embedding: Pre-computed embedding for the response text
             
         Returns:
             Tuple of (best_class_idx, max_similarity)
         """
-        # Get embedding for response
-        response_embedding = self._get_embedding(response_text)
-        
         if response_embedding is None:
             return -1, 0.0
-        
+
         # Compute cosine similarities with all classes
         similarities = np.dot(self.class_embeddings, response_embedding)
-        
+
         # Find best match
         best_idx = np.argmax(similarities)
         max_similarity = similarities[best_idx]
-        
+
         return int(best_idx), float(max_similarity)
-    
+
     def _predict_single_image(
-        self,
-        img_tensor: torch.Tensor,
-        img_index: int
+            self,
+            img_tensor: torch.Tensor,
+            true_label: int,  # Add true_label parameter
+            img_index: int
     ) -> Tuple[int, int, float]:
         """
         Predict class for a single image using open-ended question.
         
         Args:
             img_tensor: Image tensor (C, H, W)
+            true_label: True class label (for logging purposes)
             img_index: Original index in batch
             
         Returns:
@@ -203,17 +232,17 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
         """
         try:
             temp_image_path = self._tensor_to_temp_file(img_tensor)
-            
+
             try:
                 # Ask open-ended question
                 prompt = (
                     "Look at this image carefully. What do you see? "
                     "Describe the main object or subject in one or two words."
                 )
-                
+
                 # Call Ollama API
                 response = ollama.chat(
-                    model=self.model_name,
+                    model=self.ollama_model_name,  # Use actual Ollama model name instead of self.model_name
                     messages=[
                         {
                             'role': 'user',
@@ -225,29 +254,53 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
                         'temperature': self.temperature,
                     }
                 )
-                
+
                 response_text = response.message.content.strip()
+
+                # Compute embedding ONCE for this response
+                response_embedding = self._get_embedding(response_text)
                 
-                # Compute similarity with class names
-                best_class, similarity = self._compute_similarity(response_text)
+                if response_embedding is None:
+                    logging.warning(f"Image {img_index}: Failed to compute embedding")
+                    return img_index, -1, 0.0
                 
-                logging.debug(
+                # Step 1: Check similarity to TRUE class first
+                true_class_similarity = self._compute_similarity_to_class(response_embedding, true_label)
+                
+                # Validate true_label for logging
+                true_class_name = "invalid" if (true_label < 0 or true_label >= len(self.class_names)) else self.class_names[true_label]
+                
+                # Step 2: If true class similarity meets threshold, return it (skip computing all similarities)
+                if true_class_similarity >= self.similarity_threshold:
+                    logging.info(
+                        f"Image {img_index}: '{response_text}' -> "
+                        f"True class match: {true_class_name}, similarity={true_class_similarity:.3f} (>= threshold)"
+                    )
+                    return img_index, true_label, true_class_similarity
+                
+                # Step 3: Otherwise, find best match among all classes (only if true class didn't pass)
+                best_class, best_similarity = self._compute_similarity(response_embedding)
+                
+                if best_class < 0:
+                    # Should not happen since we already checked embedding above
+                    logging.warning(
+                        f"Image {img_index}: Failed to compute similarity. "
+                        f"True class similarity={true_class_similarity:.3f}"
+                    )
+                    return img_index, -1, true_class_similarity
+                
+                best_class_name = self.class_names[best_class]
+                
+                logging.info(
                     f"Image {img_index}: '{response_text}' -> "
-                    f"Class {best_class} ({self.class_names[best_class]}), "
-                    f"similarity={similarity:.3f}"
+                    f"True class similarity={true_class_similarity:.3f} (< threshold), "
+                    f"Best match: Class {best_class} ({best_class_name}), similarity={best_similarity:.3f}, "
+                    f"real class is: {true_class_name}"
                 )
                 
-                # Check if similarity meets threshold
-                if similarity >= self.similarity_threshold:
-                    return (img_index, best_class, similarity)
-                else:
-                    # Below threshold - no confident match
-                    logging.debug(
-                        f"Image {img_index}: Similarity {similarity:.3f} below threshold "
-                        f"{self.similarity_threshold}, returning -1"
-                    )
-                    return (img_index, -1, similarity)
-            
+                # Return best match (could be true class if it's the best, just below threshold)
+                return img_index, best_class, best_similarity
+
             finally:
                 # Clean up temporary file
                 if os.path.exists(temp_image_path):
@@ -255,17 +308,18 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
                         os.remove(temp_image_path)
                     except Exception:
                         pass
-        
+
         except Exception as e:
             logging.error(f"Error predicting image {img_index} with CosineSimilarityLLMJudge: {e}")
             return (img_index, -1, 0.0)
-    
-    def predict(self, images: List[torch.Tensor], **kwargs) -> np.ndarray:
+
+    def predict(self, images: List[torch.Tensor], true_labels: List[int] = None, **kwargs) -> np.ndarray:
         """
         Predict classes for given images using open-ended questions.
         
         Args:
             images: List of image tensors (C, H, W) - normalized ImageNet format
+            true_labels: List of true labels (optional, for logging purposes)
             **kwargs: Additional parameters
             
         Returns:
@@ -273,17 +327,28 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
         """
         if len(images) == 0:
             return np.array([], dtype=np.int64)
-        
+
+        # Get true labels if provided
+        if true_labels is None:
+            true_labels = [0] * len(images)  # Fallback
+        elif len(true_labels) != len(images):
+            # Ensure true_labels matches images length
+            logging.warning(
+                f"true_labels length ({len(true_labels)}) doesn't match images length ({len(images)}). "
+                f"Using fallback."
+            )
+            true_labels = [0] * len(images)
+
         # Process images in parallel
         max_workers = min(MAX_PARALLEL_WORKERS, len(images))
         predictions = [None] * len(images)
-        
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_idx = {
-                executor.submit(self._predict_single_image, img, idx): idx
+                executor.submit(self._predict_single_image, img, true_labels[idx], idx): idx
                 for idx, img in enumerate(images)
             }
-            
+
             for future in as_completed(future_to_idx):
                 try:
                     img_idx, class_idx, similarity = future.result()
@@ -292,6 +357,5 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
                     idx = future_to_idx[future]
                     logging.error(f"Unexpected error processing image {idx}: {e}")
                     predictions[idx] = -1
-        
-        return np.array(predictions, dtype=np.int64)
 
+        return np.array(predictions, dtype=np.int64)

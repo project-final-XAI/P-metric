@@ -8,7 +8,6 @@ Simple and direct approach - only one question per image.
 
 Most efficient and straightforward evaluation method.
 """
-
 import ollama
 import torch
 import numpy as np
@@ -33,7 +32,7 @@ class BinaryLLMJudge(BaseLLMJudge):
     
     This is the most efficient approach - only one question per image.
     """
-    
+
     def __init__(self, model_name: str, dataset_name: str = "imagenet", temperature: float = 0.0):
         """
         Initialize Binary LLM Judge.
@@ -45,10 +44,18 @@ class BinaryLLMJudge(BaseLLMJudge):
         """
         super().__init__(model_name, dataset_name)
         self.temperature = temperature
-        
+
+        # Extract actual Ollama model name (remove -binary/-cosine suffix)
+        # e.g., "llama3.2-vision-binary" -> "llama3.2-vision"
+        if model_name.endswith('-binary'):
+            self.ollama_model_name = model_name[:-7]  # Remove '-binary'
+        elif model_name.endswith('-cosine'):
+            self.ollama_model_name = model_name[:-7]  # Remove '-cosine'
+        else:
+            self.ollama_model_name = model_name
+
         logging.info(f"BinaryLLMJudge initialized with {len(self.class_names)} classes, temperature={temperature}")
-    
-    
+
     def _clean_response(self, response_text: str) -> str:
         """
         Extract yes/no from LLM response.
@@ -60,27 +67,27 @@ class BinaryLLMJudge(BaseLLMJudge):
             'yes' or 'no' (lowercase)
         """
         response_lower = response_text.lower().strip()
-        
+
         # Direct yes/no
         if response_lower.startswith('yes'):
             return 'yes'
         if response_lower.startswith('no'):
             return 'no'
-        
+
         # Common variations
-        if 'yes' in response_lower[:10]:
+        if 'yes' in response_lower:
             return 'yes'
-        if 'no' in response_lower[:10]:
+        if 'no' in response_lower:
             return 'no'
-        
+
         # Default to no if unclear
         return 'no'
-    
+
     def _predict_single_image(
-        self,
-        img_tensor: torch.Tensor,
-        true_label: int,
-        img_index: int
+            self,
+            img_tensor: torch.Tensor,
+            true_label: int,
+            img_index: int
     ) -> Tuple[int, int]:
         """
         Predict class for a single image using binary yes/no question.
@@ -99,20 +106,19 @@ class BinaryLLMJudge(BaseLLMJudge):
         """
         try:
             temp_image_path = self._tensor_to_temp_file(img_tensor)
-            
+
             try:
                 # Get the true class name
                 class_name = self._format_class_name(self.class_names[true_label])
-                
-                # Ask simple binary question about the true class
-                prompt = (
-                    f"Look at this image carefully. Do you see a {class_name}? "
-                    "Answer with just 'yes' or 'no'."
-                )
-                
-                # Call Ollama API with low temperature for deterministic results
+
+                # Binary question - based on research paper approach
+                prompt = (f"You are an image classification expert. "
+                          f"What do you see in the picture? "
+                          f"Is it a {class_name} from the imagenet database? "
+                          f"Answer with only 'Yes' or 'No'.")
+
                 response = ollama.chat(
-                    model=self.model_name,
+                    model=self.ollama_model_name,
                     messages=[
                         {
                             'role': 'user',
@@ -120,24 +126,22 @@ class BinaryLLMJudge(BaseLLMJudge):
                             'images': [temp_image_path]
                         }
                     ],
-                    options={
-                        'temperature': self.temperature,
-                    }
+                    options={'temperature': self.temperature}
                 )
-                
+
                 response_text = response.message.content.strip()
                 answer = self._clean_response(response_text)
-                
+
                 # If LLM says "yes", it correctly identified the class
                 # If LLM says "no", it failed to identify the class
+                logging.info(f"LLM response for {class_name}: '{response_text}' -> {answer}")
                 if answer == 'yes':
-                    return (img_index, true_label)  # Correct!
+                    return img_index, true_label  # Correct!
                 else:
                     # Return a different class to mark as incorrect
-                    # Use -1 as a marker, or pick a different class
                     wrong_class = (true_label + 1) % len(self.class_names)
-                    return (img_index, wrong_class)  # Incorrect!
-            
+                    return img_index, wrong_class  # Incorrect!
+
             finally:
                 # Clean up temporary file
                 if os.path.exists(temp_image_path):
@@ -145,11 +149,11 @@ class BinaryLLMJudge(BaseLLMJudge):
                         os.remove(temp_image_path)
                     except Exception:
                         pass
-        
+
         except Exception as e:
             logging.error(f"Error predicting image {img_index} with BinaryLLMJudge: {e}")
             return (img_index, -1)
-    
+
     def predict(self, images: List[torch.Tensor], true_labels: List[int] = None, **kwargs) -> np.ndarray:
         """
         Predict classes for given images using binary yes/no questions.
@@ -164,21 +168,21 @@ class BinaryLLMJudge(BaseLLMJudge):
         """
         if len(images) == 0:
             return np.array([], dtype=np.int64)
-        
+
         # Get true labels if provided
         if true_labels is None:
             true_labels = [0] * len(images)  # Fallback
-        
+
         # Process images in parallel
         max_workers = min(MAX_PARALLEL_WORKERS, len(images))
         predictions = [None] * len(images)
-        
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_idx = {
                 executor.submit(self._predict_single_image, img, true_labels[idx], idx): idx
                 for idx, img in enumerate(images)
             }
-            
+
             for future in as_completed(future_to_idx):
                 try:
                     img_idx, class_idx = future.result()
@@ -187,6 +191,5 @@ class BinaryLLMJudge(BaseLLMJudge):
                     idx = future_to_idx[future]
                     logging.error(f"Unexpected error processing image {idx}: {e}")
                     predictions[idx] = -1
-        
-        return np.array(predictions, dtype=np.int64)
 
+        return np.array(predictions, dtype=np.int64)

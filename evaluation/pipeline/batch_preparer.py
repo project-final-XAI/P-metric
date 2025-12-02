@@ -1,7 +1,9 @@
 """
 Batch preparation utilities for occlusion evaluation.
 
-Handles preparing batches of images for occlusion processing.
+NOTE: This module is deprecated. Batch preparation is now handled directly
+in Phase2Runner using CSVProgressChecker. This file is kept for backward
+compatibility but is no longer used in the main codebase.
 """
 
 from typing import List, Dict, Tuple, Optional
@@ -9,24 +11,22 @@ import numpy as np
 import torch
 from pathlib import Path
 
-from core.progress_tracker import ProgressTracker
-
 
 class BatchPreparer:
     """
-    Prepares batches of images for occlusion evaluation.
+    DEPRECATED: Batch preparation is now handled in Phase2Runner.
     
-    Handles filtering completed items and organizing data for processing.
+    This class is kept for backward compatibility but is no longer used.
     """
     
-    def __init__(self, progress: ProgressTracker):
+    def __init__(self, progress_checker):
         """
         Initialize batch preparer.
         
         Args:
-            progress: ProgressTracker instance for checking completed items
+            progress_checker: CSVProgressChecker instance (or compatible interface)
         """
-        self.progress = progress
+        self.progress_checker = progress_checker
     
     def prepare_occlusion_level(
         self,
@@ -63,7 +63,7 @@ class BatchPreparer:
         
         for data in batch_data:
             # Skip if already completed
-            if self.progress.is_completed(
+            if self.progress_checker.is_completed(
                 data['gen_model'], data['method'], data['img_id'],
                 judge_name, strategy, occlusion_level
             ):

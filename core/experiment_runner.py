@@ -17,11 +17,8 @@ from core.phase1_runner import Phase1Runner
 from core.phase2_runner import Phase2Runner
 from core.phase3_runner import Phase3Runner
 from models.loader import load_model
-from evaluation.judging.registry import (
-    get_judging_model, register_judging_model,
-    create_binary_llm_judge_factory,
-    create_cosine_llm_judge_factory
-)
+from evaluation.judging.binary_llm_judge import BinaryLLMJudge
+from evaluation.judging.cosine_llm_judge import CosineSimilarityLLMJudge
 from evaluation.judging.base import JudgingModel
 
 # Setup logging (separate from tqdm stdout)
@@ -63,9 +60,6 @@ class ExperimentRunner:
         
         # Model cache to avoid reloading (supports both PyTorch models and JudgingModel instances)
         self._model_cache = {}
-        
-        # Register LLM judges if needed
-        self._register_judging_models()
         
         # Validate configuration
         self._validate_config()
@@ -109,41 +103,11 @@ class ExperimentRunner:
         if not self.config.FILL_STRATEGIES:
             raise ValueError("FILL_STRATEGIES cannot be empty")
     
-    def _register_judging_models(self):
-        """Register judging model factories for LLM judges."""
-        try:
-            dataset_name = getattr(self.config, 'DATASET_NAME', 'imagenet')
-            
-            # Register Binary LLM judges (Yes/No approach)
-            binary_factory = create_binary_llm_judge_factory(
-                dataset_name=dataset_name,
-                temperature=0.0  # Deterministic for accuracy
-            )
-            binary_models = ['llama3.2-vision-binary', 'llama-vision-binary']
-            for model_name in binary_models:
-                register_judging_model(model_name, binary_factory)
-                logging.debug(f"Registered Binary LLM judge factory for {model_name}")
-            
-            # Register Cosine Similarity LLM judges
-            cosine_factory = create_cosine_llm_judge_factory(
-                dataset_name=dataset_name,
-                temperature=0.1,  # Low temperature for consistency
-                similarity_threshold=0.8,  # Threshold for acceptance
-                embedding_model="nomic-embed-text"
-            )
-            cosine_models = ['llama3.2-vision-cosine', 'llama-vision-cosine']
-            for model_name in cosine_models:
-                register_judging_model(model_name, cosine_factory)
-                logging.debug(f"Registered Cosine Similarity LLM judge factory for {model_name}")
-                
-        except Exception as e:
-            logging.warning(f"Failed to register LLM judges: {e}")
-    
     def _get_cached_model(self, model_name: str):
         """
         Load model with caching. Supports both PyTorch models and JudgingModel instances.
         
-        Checks the judging model registry first. If not found, loads as PyTorch model.
+        Checks if it's an LLM judge by name pattern, otherwise loads as PyTorch model.
         
         Args:
             model_name: Name of the model to load
@@ -152,11 +116,27 @@ class ExperimentRunner:
             Model instance (PyTorch model or JudgingModel)
         """
         if model_name not in self._model_cache:
-            # Check if it's a registered judging model (LLM judge)
-            judging_model = get_judging_model(model_name)
-            if judging_model is not None:
-                logging.info(f"Loading judging model from registry: {model_name}")
-                self._model_cache[model_name] = judging_model
+            dataset_name = getattr(self.config, 'DATASET_NAME', 'imagenet')
+            
+            # Check if it's an LLM judge by name pattern
+            if model_name.endswith('-binary'):
+                # Binary LLM judge
+                logging.info(f"Loading Binary LLM judge: {model_name}")
+                self._model_cache[model_name] = BinaryLLMJudge(
+                    model_name=model_name,
+                    dataset_name=dataset_name,
+                    temperature=0.0  # Deterministic for accuracy
+                )
+            elif model_name.endswith('-cosine'):
+                # Cosine Similarity LLM judge
+                logging.info(f"Loading Cosine Similarity LLM judge: {model_name}")
+                self._model_cache[model_name] = CosineSimilarityLLMJudge(
+                    model_name=model_name,
+                    dataset_name=dataset_name,
+                    temperature=0.1,  # Low temperature for consistency
+                    similarity_threshold=0.8,  # Threshold for acceptance
+                    embedding_model="nomic-embed-text"
+                )
             else:
                 # Load as PyTorch model
                 logging.info(f"Loading PyTorch model: {model_name}")

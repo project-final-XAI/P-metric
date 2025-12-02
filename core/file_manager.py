@@ -93,20 +93,6 @@ class FileManager:
             f"{strategy}.csv"
         )
     
-    # ==================== Progress Tracking ====================
-    
-    def get_progress_file_path(self, dataset: str) -> Path:
-        """
-        Get path to progress tracking file.
-        
-        Args:
-            dataset: Dataset name
-            
-        Returns:
-            Path to .progress.json file
-        """
-        return self.get_result_dir(dataset) / ".progress.json"
-    
     # ==================== I/O Operations ====================
     
     def ensure_dir_exists(self, path: Path) -> None:
@@ -193,11 +179,8 @@ class FileManager:
         if not result_dir.exists():
             return []
         
-        # Find all CSV files, excluding hidden files like .progress.json
-        return [
-            f for f in result_dir.rglob("*.csv")
-            if not f.name.startswith(".")
-        ]
+        # Find all CSV files
+        return list(result_dir.rglob("*.csv"))
     
     def parse_result_file_path(self, path: Path, dataset: str) -> dict:
         """

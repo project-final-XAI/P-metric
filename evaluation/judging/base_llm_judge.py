@@ -19,7 +19,7 @@ from data.imagenet_class_mapping import get_cached_mapping, format_class_for_llm
 
 
 # Maximum parallel workers for all LLM judges
-MAX_PARALLEL_WORKERS = 6
+MAX_PARALLEL_WORKERS = 12  
 
 
 def tensor_to_pil_image(tensor: torch.Tensor) -> Image.Image:
@@ -33,7 +33,12 @@ def tensor_to_pil_image(tensor: torch.Tensor) -> Image.Image:
         PIL Image in RGB format
     """
     # Move tensor to CPU first to avoid device mismatch issues
-    img_tensor = tensor.cpu().clone()
+    # Use detach() to break gradient tracking and ensure clean copy
+    with torch.no_grad():
+        if tensor.is_cuda:
+            # Synchronize CUDA operations before moving to CPU
+            torch.cuda.synchronize()
+        img_tensor = tensor.detach().cpu().clone()
     
     # Denormalize ImageNet normalization
     mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
@@ -170,9 +175,10 @@ class BaseLLMJudge(JudgingModel):
             Path to temporary image file
         """
         pil_image = tensor_to_pil_image(tensor)
-        temp_fd, temp_path = tempfile.mkstemp(suffix='.jpg')
+        # Use PNG instead of JPEG for better quality (no compression artifacts)
+        temp_fd, temp_path = tempfile.mkstemp(suffix='.png')
         os.close(temp_fd)
-        pil_image.save(temp_path, 'JPEG')
+        pil_image.save(temp_path, 'PNG')
         return temp_path
     
     @abstractmethod

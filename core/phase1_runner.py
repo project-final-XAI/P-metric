@@ -13,7 +13,7 @@ from typing import Dict, Any
 
 from core.gpu_manager import GPUManager
 from core.file_manager import FileManager
-from core.gpu_utils import transfer_to_device, clear_cache_if_needed
+from core.gpu_utils import transfer_to_device, clear_cache_if_needed, prepare_batch_tensor
 from attribution.registry import get_attribution_method
 from data.loader import get_dataloader
 from evaluation.occlusion import sort_pixels
@@ -72,10 +72,13 @@ class Phase1Runner:
             
             # Load dataset once
             dataloader = get_dataloader(dataset_name, batch_size=32, shuffle=False)
-            image_label_map = {
-                f"image_{i:05d}": (img, lbl.item())
-                for i, (img, lbl) in enumerate(dataloader)
-            }
+            image_label_map = {}
+            global_idx = 0
+            for batch_images, batch_labels in dataloader:
+                # Iterate through each image and label in the batch
+                for img, lbl in zip(batch_images, batch_labels):
+                    image_label_map[f"image_{global_idx:05d}"] = (img, lbl.item())
+                    global_idx += 1
             
             # Process each model-method combination
             total_combinations = len(self.config.GENERATING_MODELS) * len(self.config.ATTRIBUTION_METHODS)
@@ -156,11 +159,9 @@ class Phase1Runner:
             end_idx = min(i + batch_size, len(images_to_process))
             
             # Prepare batch with GPU optimizations
-            batch_images = torch.cat(images_to_process[i:end_idx], dim=0)
-            batch_images = transfer_to_device(
-                batch_images,
-                self.config.DEVICE,
-                non_blocking=True,
+            batch_images = prepare_batch_tensor(
+                images_to_process[i:end_idx],
+                device=self.config.DEVICE,
                 memory_format=torch.channels_last
             )
             batch_labels = torch.tensor(labels[i:end_idx]).to(self.config.DEVICE, non_blocking=True)

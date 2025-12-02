@@ -9,8 +9,6 @@ import logging
 
 from evaluation.judging.base import JudgingModel
 from evaluation.judging.pytorch_judge import PyTorchJudgingModel
-from evaluation.judging.binary_llm_judge import BinaryLLMJudge
-from evaluation.judging.cosine_llm_judge import CosineSimilarityLLMJudge
 
 
 # Registry mapping model names to factory functions
@@ -106,60 +104,4 @@ def create_pytorch_judging_model_factory(
     return factory
 
 
-def create_binary_llm_judge_factory(
-    dataset_name: str = "imagenet",
-    temperature: float = 0.0
-) -> Callable[[str], JudgingModel]:
-    """
-    Create a factory function for Binary LLM judging models.
-    
-    Asks yes/no questions for each category.
-    
-    Args:
-        dataset_name: Dataset name to use for class names (default: "imagenet")
-        temperature: LLM temperature (default: 0.0 for deterministic)
-    
-    Returns:
-        Factory function that creates BinaryLLMJudge instances
-    """
-    def factory(model_name: str) -> BinaryLLMJudge:
-        return BinaryLLMJudge(
-            model_name=model_name,
-            dataset_name=dataset_name,
-            temperature=temperature
-        )
-    
-    return factory
-
-
-def create_cosine_llm_judge_factory(
-    dataset_name: str = "imagenet",
-    temperature: float = 0.1,
-    similarity_threshold: float = 0.8,
-    embedding_model: str = "nomic-embed-text"
-) -> Callable[[str], JudgingModel]:
-    """
-    Create a factory function for Cosine Similarity LLM judging models.
-    
-    Asks open-ended questions and computes cosine similarity with class names.
-    
-    Args:
-        dataset_name: Dataset name to use for class names (default: "imagenet")
-        temperature: LLM temperature (default: 0.1 for mostly deterministic)
-        similarity_threshold: Minimum cosine similarity to accept (default: 0.8)
-        embedding_model: Ollama embedding model name (default: "nomic-embed-text")
-    
-    Returns:
-        Factory function that creates CosineSimilarityLLMJudge instances
-    """
-    def factory(model_name: str) -> CosineSimilarityLLMJudge:
-        return CosineSimilarityLLMJudge(
-            model_name=model_name,
-            dataset_name=dataset_name,
-            temperature=temperature,
-            similarity_threshold=similarity_threshold,
-            embedding_model=embedding_model
-        )
-    
-    return factory
 

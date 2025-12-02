@@ -61,17 +61,6 @@ if torch.cuda.is_available():
     torch.set_float32_matmul_precision('high')
 
 # -----------------
-# Progress Tracking Configuration
-# -----------------
-# Auto-save progress every N completed items (0 to disable)
-
-PROGRESS_AUTO_SAVE_INTERVAL = 200
-
-# Auto-save progress every N seconds (0 to disable)
-
-PROGRESS_AUTO_SAVE_TIME = 600  # 10 minutes
-
-# -----------------
 # Dataset Configuration
 # -----------------
 DATASET_CONFIG = {
@@ -115,12 +104,8 @@ JUDGING_MODELS = [
     # "swin_t",
     # "sipakmed_efficientnetB0.pth"
     # "sipakmed_cropped_efficientnet.pth",
-    
-    # LLM judges - Two evaluation strategies:
-    # 1. Binary approach: Asks "Do you see {category}? Yes/No"
+
     "llama3.2-vision-binary",
-    
-    # 2. Cosine similarity: Asks "What do you see?" and compares with embeddings
     # "llama3.2-vision-cosine",
 ]
 
@@ -128,16 +113,16 @@ JUDGING_MODELS = [
 # Attribution Methods Configuration
 # -----------------
 ATTRIBUTION_METHODS = [
-    "saliency",
+    # "saliency",
     "inputxgradient",
-    "smoothgrad",
-    "guided_backprop",
-    "integrated_gradients",
+    # "smoothgrad",
+    # "guided_backprop",
+    # "integrated_gradients",
     "occlusion",
-    "gradientshap",
-    "xrai",
+    # "gradientshap",
+    # "xrai",
     "grad_cam",
-    "guided_gradcam",
+    # "guided_gradcam",
     "random_baseline",
     # "c3f",
 ]
@@ -146,14 +131,14 @@ ATTRIBUTION_METHODS = [
 # Occlusion Configuration
 # -----------------
 # Occlusion levels (percentages) to evaluate
-OCCLUSION_LEVELS = list(range(5, 100, 5))
+OCCLUSION_LEVELS = list(range(0, 100, 5))
 
 # Fill strategies for occluded pixels
 FILL_STRATEGIES = [
-    "gray",
+    # "gray",
     # "blur",
     # "random_noise",
     # "black",
-    # "mean",
+    "mean",
     # "white",
 ]

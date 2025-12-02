@@ -34,7 +34,9 @@ class ProgressTracker:
         """
         self.file_manager = file_manager
         self.dataset = dataset
-        self.progress_file = file_manager.get_progress_file_path(dataset)
+        # Note: get_progress_file_path was removed - this class is deprecated
+        # For Phase 2, use CSVProgressChecker instead
+        self.progress_file = file_manager.get_result_dir(dataset) / ".progress.json"
         self.completed: Set[Tuple] = set()
         self._dirty = False
         self.auto_save_interval = auto_save_interval
