@@ -4,17 +4,14 @@ Cosine Similarity LLM Judge - Open-ended with similarity matching.
 Asks "What do you see?" and compares the answer to class names using
 cosine similarity of embeddings. More flexible than exact matching.
 """
-import ollama
-import torch
-import numpy as np
-from typing import List, Tuple
 import logging
-import os
-import time
+import numpy as np
+from typing import Tuple
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from evaluation.judging.base_llm_judge import BaseLLMJudge, MAX_PARALLEL_WORKERS
+import ollama
+
+from evaluation.judging.base_llm_judge import BaseLLMJudge
 
 
 class CosineSimilarityLLMJudge(BaseLLMJudge):
@@ -201,7 +198,6 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
 
         return int(best_idx), float(max_similarity)
 
-    
     def _predict_single_image_from_path(
             self,
             image_path: str,
@@ -280,50 +276,3 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
         except Exception as e:
             logging.error(f"Error predicting image {img_index} with CosineSimilarityLLMJudge: {e}")
             return (img_index, -1, 0.0)
-
-    def predict(self, images: List[torch.Tensor], true_labels: List[int] = None, **kwargs) -> np.ndarray:
-        """
-        Predict classes for given images using open-ended questions.
-        
-        Args:
-            images: List of image tensors (C, H, W) - normalized ImageNet format
-            true_labels: List of true labels (optional, for logging purposes)
-            **kwargs: Additional parameters
-            
-        Returns:
-            Array of predicted class indices (shape: [batch_size])
-        """
-        if len(images) == 0:
-            return np.array([], dtype=np.int64)
-
-        # Get true labels if provided
-        if true_labels is None:
-            true_labels = [0] * len(images)  # Fallback
-        elif len(true_labels) != len(images):
-            # Ensure true_labels matches images length
-            logging.warning(
-                f"true_labels length ({len(true_labels)}) doesn't match images length ({len(images)}). "
-                f"Using fallback."
-            )
-            true_labels = [0] * len(images)
-
-        # Process images in parallel
-        max_workers = min(MAX_PARALLEL_WORKERS, len(images))
-        predictions = [None] * len(images)
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_idx = {
-                executor.submit(self._predict_single_image, img, true_labels[idx], idx): idx
-                for idx, img in enumerate(images)
-            }
-
-            for future in as_completed(future_to_idx):
-                try:
-                    img_idx, class_idx, similarity = future.result()
-                    predictions[img_idx] = class_idx
-                except Exception as e:
-                    idx = future_to_idx[future]
-                    logging.error(f"Unexpected error processing image {idx}: {e}")
-                    predictions[idx] = -1
-
-        return np.array(predictions, dtype=np.int64)

@@ -20,7 +20,6 @@ from threading import Lock
 from core.gpu_manager import GPUManager
 from core.file_manager import FileManager
 from core.gpu_utils import prepare_batch_tensor
-from core.phase1_runner import Phase1Runner
 from core.phase2_runner import Phase2Runner
 from data.loader import get_dataloader, get_default_transforms
 from evaluation.judging.base import JudgingModel
@@ -530,27 +529,9 @@ class Phase3Runner:
         judge_model: Any,
         batch_labels: List[int] = None
     ) -> np.ndarray:
-        """Evaluate a batch of images with the judging model."""
+        """Evaluate a batch of images with PyTorch judging model."""
         try:
-            if isinstance(judge_model, JudgingModel):
-                batch_images_cpu = []
-                has_gpu_images = False
-                for img in batch_images:
-                    if img.is_cuda:
-                        has_gpu_images = True
-                        batch_images_cpu.append(img.detach().cpu())
-                    else:
-                        batch_images_cpu.append(img)
-                
-                if has_gpu_images:
-                    torch.cuda.synchronize()
-                
-                if batch_labels is not None:
-                    return judge_model.predict(batch_images_cpu, true_labels=batch_labels)
-                else:
-                    return judge_model.predict(batch_images_cpu)
-            
-            # PyTorch models
+            # Only PyTorch models reach here (LLM judges use predict_from_paths directly)
             batch_tensor = prepare_batch_tensor(
                 batch_images,
                 self.config.DEVICE,

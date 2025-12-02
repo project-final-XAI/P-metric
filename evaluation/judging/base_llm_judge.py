@@ -4,14 +4,11 @@ Base class for LLM judges with shared functionality.
 Provides common methods for all LLM-based judges to avoid code duplication.
 """
 
-import torch
-import tempfile
-import os
 import logging
 import numpy as np
+import os
 from typing import List, Dict
 from abc import abstractmethod
-from PIL import Image
 import ollama  # Import once at module level for better performance
 
 from config import DATASET_CONFIG
@@ -36,7 +33,6 @@ class BaseLLMJudge(JudgingModel):
     Handles:
     - Loading class names from dataset
     - Loading ImageNet class mapping (synset ID -> readable name)
-    - Converting tensors to temporary image files
     - Formatting class names for LLM prompts
     """
     
@@ -141,15 +137,6 @@ class BaseLLMJudge(JudgingModel):
         
         # Replace underscores with spaces for other datasets
         return class_name.replace('_', ' ')
-    
-    @abstractmethod
-    def predict(self, images: List[torch.Tensor], **kwargs):
-        """
-        Predict classes for given images.
-        
-        Must be implemented by subclasses.
-        """
-        pass
     
     @abstractmethod
     def _predict_single_image_from_path(

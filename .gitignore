@@ -12,3 +12,4 @@ results/heatmaps
 *.pyc
 */__pycache__/
 /test/results
+/results/occluded

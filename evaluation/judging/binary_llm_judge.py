@@ -8,16 +8,10 @@ Simple and direct approach - only one question per image.
 
 Most efficient and straightforward evaluation method.
 """
-import os
-
-import ollama
-import torch
-import numpy as np
-from typing import List, Tuple
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Tuple
 
-from evaluation.judging.base_llm_judge import BaseLLMJudge, MAX_PARALLEL_WORKERS
+from evaluation.judging.base_llm_judge import BaseLLMJudge
 
 
 class BinaryLLMJudge(BaseLLMJudge):
