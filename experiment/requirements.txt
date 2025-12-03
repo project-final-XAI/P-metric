@@ -1,0 +1,7 @@
+# Additional dependencies for SSMS vs P-Metric experiment
+# Most dependencies are already in root requirements.txt
+
+scipy>=1.7.0
+scikit-learn>=1.0.0
+
+

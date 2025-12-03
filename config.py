@@ -94,8 +94,8 @@ DATASET_NAME = "imagenet"
 # -----------------
 # Models used for generating attribution heatmaps (Phase 1)
 GENERATING_MODELS = [
-    "resnet50",
-    # "mobilenet_v2",
+    # "resnet50",
+    "mobilenet_v2",
     # "vgg16",
     # "vit_b_16",
     # "swin_t",
@@ -106,7 +106,7 @@ GENERATING_MODELS = [
 # Models used for evaluating occluded images (Phase 2)
 JUDGING_MODELS = [
     "resnet50",
-    "mobilenet_v2",
+    # "mobilenet_v2",
 
     # "vit_b_16",
     # "swin_t",
@@ -114,7 +114,7 @@ JUDGING_MODELS = [
     # "sipakmed_efficientnetB0.pth"
     # "sipakmed_cropped_efficientnet.pth",
 
-    "llama3.2-vision-binary",
+    # "llama3.2-vision-binary",
     # "llama3.2-vision-cosine",
 ]
 
@@ -122,18 +122,18 @@ JUDGING_MODELS = [
 # Attribution Methods Configuration
 # -----------------
 ATTRIBUTION_METHODS = [
-    # "saliency",
+    "saliency",
     "inputxgradient",
-    # "smoothgrad",
-    # "guided_backprop",
-    # "integrated_gradients",
+    "smoothgrad",
+    "guided_backprop",
+    "integrated_gradients",
     "occlusion",
-    # "gradientshap",
+    "gradientshap",
     "xrai",
     "grad_cam",
-    # "guided_gradcam",
+    "guided_gradcam",
     "random_baseline",
-    # "c3f",
+    "c3f",
 ]
 
 # -----------------
@@ -144,7 +144,7 @@ OCCLUSION_LEVELS = list(range(0, 100, 5))
 
 # Fill strategies for occluded pixels
 FILL_STRATEGIES = [
-    "gray",
+    # "gray",
     # "blur",
     # "random_noise",
     # "black",

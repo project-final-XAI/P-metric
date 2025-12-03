@@ -13,3 +13,4 @@ results/heatmaps
 */__pycache__/
 /test/results
 /results/occluded
+/experiment/experiment
