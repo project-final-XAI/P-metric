@@ -31,21 +31,67 @@ class FileManager:
         """Get directory for dataset heatmaps."""
         return self.heatmap_dir / dataset
     
-    def get_sorted_heatmap_path(self, dataset: str, model: str, method: str, img_id: str) -> Path:
-        """Get path to sorted heatmap NPY file."""
-        return self.heatmap_dir / dataset / model / method / "sorted" / f"{model}-{method}-{img_id}.npy"
+    def get_sorted_heatmap_path(self, dataset: str, model: str, method: str, img_id: str, category_name: str = None) -> Path:
+        """
+        Get path to sorted heatmap NPY file.
+        
+        Args:
+            dataset: Dataset name
+            model: Model name
+            method: Attribution method name
+            img_id: Image ID
+            category_name: Optional category name (for ImageNet) to include in filename
+        """
+        if category_name and dataset == "imagenet":
+            # Sanitize category name for filename (remove special chars, spaces -> underscores)
+            safe_category = category_name.replace(" ", "_").replace(",", "").replace("/", "_").replace("\\", "_")
+            safe_category = "".join(c for c in safe_category if c.isalnum() or c in "_-")[:30]  # Limit length
+            filename = f"{model}-{method}-{img_id}-{safe_category}.npy"
+        else:
+            filename = f"{model}-{method}-{img_id}.npy"
+        return self.heatmap_dir / dataset / model / method / "sorted" / filename
     
-    def get_regular_heatmap_path(self, dataset: str, model: str, method: str, img_id: str) -> Path:
-        """Get path to regular heatmap PNG file."""
-        return self.heatmap_dir / dataset / model / method / "regular" / f"{model}-{method}-{img_id}.png"
+    def get_regular_heatmap_path(self, dataset: str, model: str, method: str, img_id: str, category_name: str = None) -> Path:
+        """
+        Get path to regular heatmap PNG file.
+        
+        Args:
+            dataset: Dataset name
+            model: Model name
+            method: Attribution method name
+            img_id: Image ID
+            category_name: Optional category name (for ImageNet) to include in filename
+        """
+        if category_name and dataset == "imagenet":
+            # Sanitize category name for filename (remove special chars, spaces -> underscores)
+            safe_category = category_name.replace(" ", "_").replace(",", "").replace("/", "_").replace("\\", "_")
+            safe_category = "".join(c for c in safe_category if c.isalnum() or c in "_-")[:30]  # Limit length
+            filename = f"{model}-{method}-{img_id}-{safe_category}.png"
+        else:
+            filename = f"{model}-{method}-{img_id}.png"
+        return self.heatmap_dir / dataset / model / method / "regular" / filename
     
-    def check_sorted_heatmap_exists(self, dataset: str, model: str, method: str, img_id: str) -> bool:
+    def check_sorted_heatmap_exists(self, dataset: str, model: str, method: str, img_id: str, category_name: str = None) -> bool:
         """Check if sorted heatmap exists."""
-        return self.get_sorted_heatmap_path(dataset, model, method, img_id).exists()
+        # Try both with and without category name for backward compatibility
+        if category_name and dataset == "imagenet":
+            path_with_category = self.get_sorted_heatmap_path(dataset, model, method, img_id, category_name)
+            if path_with_category.exists():
+                return True
+        # Fallback to old format
+        path_old = self.get_sorted_heatmap_path(dataset, model, method, img_id)
+        return path_old.exists()
     
-    def check_regular_heatmap_exists(self, dataset: str, model: str, method: str, img_id: str) -> bool:
+    def check_regular_heatmap_exists(self, dataset: str, model: str, method: str, img_id: str, category_name: str = None) -> bool:
         """Check if regular heatmap exists."""
-        return self.get_regular_heatmap_path(dataset, model, method, img_id).exists()
+        # Try both with and without category name for backward compatibility
+        if category_name and dataset == "imagenet":
+            path_with_category = self.get_regular_heatmap_path(dataset, model, method, img_id, category_name)
+            if path_with_category.exists():
+                return True
+        # Fallback to old format
+        path_old = self.get_regular_heatmap_path(dataset, model, method, img_id)
+        return path_old.exists()
     
     def scan_sorted_heatmaps(self, dataset: str, model: str, method: str) -> List[Path]:
         """Scan all sorted heatmap files for a model-method combination."""

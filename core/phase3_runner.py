@@ -14,7 +14,7 @@ from tqdm import tqdm
 from typing import Dict, Any, List, Tuple, Set
 from collections import defaultdict
 from PIL import Image
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
 from threading import Lock
 
 from core.gpu_manager import GPUManager
@@ -303,21 +303,23 @@ class Phase3Runner:
     ) -> Tuple[int, float, int]:
         """Evaluate a level using LLM judge (optimized pipeline processing)."""
         batch_size = getattr(self.config, 'PHASE3_BATCH_SIZE_LLM', 32)
-        shared_executor = ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS)
+        batch_executor = ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_WORKERS, len(images_to_process) // batch_size + 1))
         
         try:
             # Submit all batches immediately
+            # NOTE: Do NOT pass shared_executor to predict_from_paths - it creates its own executor
+            # to avoid deadlock from nested executor usage
             batch_futures = []
             for i in range(0, len(images_to_process), batch_size):
                 end_idx = min(i + batch_size, len(images_to_process))
                 batch_paths = images_to_process[i:end_idx]
                 batch_labels = labels_to_process[i:end_idx]
                 
-                future = shared_executor.submit(
+                future = batch_executor.submit(
                     judge_model.predict_from_paths,
                     [str(path) for path in batch_paths],
                     batch_labels,
-                    shared_executor=shared_executor
+                    shared_executor=None  # Let predict_from_paths create its own executor to avoid deadlock
                 )
                 batch_futures.append((future, batch_paths, batch_labels, i // batch_size))
             
@@ -331,7 +333,12 @@ class Phase3Runner:
             for future in as_completed(future_to_batch.keys()):
                 batch_paths, batch_labels, batch_idx = future_to_batch[future]
                 try:
-                    predictions = future.result()
+                    # Add timeout to prevent infinite hang (5 minutes per batch should be enough)
+                    predictions = future.result(timeout=300)
+                    batch_results[batch_idx] = (predictions, batch_paths, batch_labels)
+                except FutureTimeoutError:
+                    logging.error(f"Timeout processing batch {batch_idx} (exceeded 5 minutes)")
+                    predictions = np.array([-1] * len(batch_paths), dtype=np.int64)
                     batch_results[batch_idx] = (predictions, batch_paths, batch_labels)
                 except Exception as e:
                     logging.error(f"Error processing batch {batch_idx}: {e}")
@@ -348,7 +355,7 @@ class Phase3Runner:
                     items_since_save, last_save_time, save_interval_items, save_interval_seconds
                 )
         finally:
-            shared_executor.shutdown(wait=False)
+            batch_executor.shutdown(wait=True)  # Wait for all batches to complete before shutting down
         
         return items_since_save, last_save_time, processed_count
     

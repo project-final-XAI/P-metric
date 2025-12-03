@@ -7,7 +7,7 @@ Provides common methods for all LLM-based judges to avoid code duplication.
 import logging
 import numpy as np
 import os
-from typing import List, Dict
+from typing import List, Dict, Union, Any
 from abc import abstractmethod
 import ollama  # Import once at module level for better performance
 
@@ -231,6 +231,98 @@ class BaseLLMJudge(JudgingModel):
         
         # Should not reach here, but just in case
         raise last_exception if last_exception else Exception("Unknown error in Ollama call")
+    
+    def predict(
+        self,
+        images: Union[List, np.ndarray, Any],
+        **kwargs
+    ) -> np.ndarray:
+        """
+        Predict classes for given images (required by JudgingModel interface).
+        
+        For LLM judges, this method accepts image paths (strings or Path objects).
+        If tensors are provided, they will be saved temporarily to disk.
+        
+        Args:
+            images: Input images - can be:
+                   - List of image file paths (str or Path)
+                   - List of PIL Images
+                   - Other formats (will attempt conversion)
+            **kwargs: Additional parameters:
+                    - true_labels: List of true labels (optional)
+                    - shared_executor: ThreadPoolExecutor for parallel processing (optional)
+        
+        Returns:
+            Array of predicted class indices (shape: [batch_size])
+        """
+        from pathlib import Path
+        import tempfile
+        
+        # Extract true_labels from kwargs if provided
+        true_labels = kwargs.get('true_labels', None)
+        shared_executor = kwargs.get('shared_executor', None)
+        
+        # Convert images to paths
+        image_paths = []
+        temp_files = []  # Track temporary files for cleanup
+        
+        try:
+            for img in images:
+                if isinstance(img, (str, Path)):
+                    # Already a path
+                    image_paths.append(str(img))
+                elif hasattr(img, 'save'):
+                    # PIL Image or similar - save to temp file
+                    temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                    img.save(temp_file.name)
+                    image_paths.append(temp_file.name)
+                    temp_files.append(temp_file.name)
+                else:
+                    # Try to convert to PIL Image and save
+                    try:
+                        from PIL import Image
+                        if isinstance(img, np.ndarray):
+                            pil_img = Image.fromarray(img)
+                        else:
+                            # Assume it's a tensor-like object
+                            import torch
+                            if isinstance(img, torch.Tensor):
+                                # Convert tensor to numpy then PIL
+                                img_np = img.cpu().numpy()
+                                if img_np.ndim == 3:
+                                    # (C, H, W) -> (H, W, C)
+                                    img_np = img_np.transpose(1, 2, 0)
+                                elif img_np.ndim == 4:
+                                    # (B, C, H, W) -> take first image
+                                    img_np = img_np[0].transpose(1, 2, 0)
+                                # Normalize if needed (assuming 0-1 range)
+                                if img_np.max() <= 1.0:
+                                    img_np = (img_np * 255).astype(np.uint8)
+                                pil_img = Image.fromarray(img_np)
+                            else:
+                                raise ValueError(f"Unsupported image type: {type(img)}")
+                        
+                        temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                        pil_img.save(temp_file.name)
+                        image_paths.append(temp_file.name)
+                        temp_files.append(temp_file.name)
+                    except Exception as e:
+                        logging.error(f"Failed to convert image to path: {e}")
+                        # Create a dummy path that will fail gracefully
+                        image_paths.append("")
+            
+            # Use predict_from_paths for actual prediction
+            return self.predict_from_paths(image_paths, true_labels=true_labels, shared_executor=shared_executor, **kwargs)
+        
+        finally:
+            # Clean up temporary files
+            for temp_file in temp_files:
+                try:
+                    import os
+                    if os.path.exists(temp_file):
+                        os.unlink(temp_file)
+                except Exception as e:
+                    logging.warning(f"Failed to delete temp file {temp_file}: {e}")
     
     def predict_from_paths(self, image_paths: List[str], true_labels: List[int] = None, shared_executor=None, **kwargs) -> np.ndarray:
         """

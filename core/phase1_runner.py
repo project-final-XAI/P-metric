@@ -20,6 +20,7 @@ from core.gpu_utils import clear_cache_if_needed, prepare_batch_tensor
 from attribution.registry import get_attribution_method
 from data.loader import get_dataloader
 from evaluation.occlusion import sort_pixels
+from data.imagenet_class_mapping import get_cached_mapping, format_class_for_llm
 
 
 class Phase1Runner:
@@ -45,6 +46,25 @@ class Phase1Runner:
         self.gpu_manager = gpu_manager
         self.file_manager = file_manager
         self.model_cache = model_cache
+        
+        # Load ImageNet class mapping if needed (for category names in filenames)
+        self.imagenet_mapping = None
+        if config.DATASET_NAME == "imagenet":
+            try:
+                self.imagenet_mapping = get_cached_mapping()
+                # Also need synset IDs in order to map label index -> synset ID -> category name
+                from config import DATASET_CONFIG
+                import os
+                dataset_path = DATASET_CONFIG.get("imagenet", {}).get("path")
+                if dataset_path and os.path.exists(dataset_path):
+                    self.synset_ids = sorted([d for d in os.listdir(dataset_path) 
+                                            if os.path.isdir(os.path.join(dataset_path, d))])
+                else:
+                    self.synset_ids = []
+            except Exception as e:
+                logging.warning(f"Could not load ImageNet mapping for category names: {e}")
+                self.imagenet_mapping = None
+                self.synset_ids = []
     
     def run(self, get_cached_model_func):
         """
@@ -136,11 +156,23 @@ class Phase1Runner:
         labels = []
         
         for img_id, (img, label) in list(image_label_map.items()):
+            # Get category name for ImageNet
+            category_name = None
+            if dataset_name == "imagenet" and self.imagenet_mapping and self.synset_ids:
+                try:
+                    if label < len(self.synset_ids):
+                        synset_id = self.synset_ids[label]
+                        category_name_full = self.imagenet_mapping.get(synset_id, "")
+                        if category_name_full:
+                            category_name = format_class_for_llm(category_name_full)
+                except Exception as e:
+                    logging.debug(f"Could not get category name for label {label}: {e}")
+            
             sorted_path = self.file_manager.get_sorted_heatmap_path(
-                dataset_name, model_name, method_name, img_id
+                dataset_name, model_name, method_name, img_id, category_name
             )
             regular_path = self.file_manager.get_regular_heatmap_path(
-                dataset_name, model_name, method_name, img_id
+                dataset_name, model_name, method_name, img_id, category_name
             )
             
             # Only process if either file doesn't exist
@@ -183,23 +215,36 @@ class Phase1Runner:
             if heatmaps is not None:
                 for j, heatmap in enumerate(heatmaps):
                     img_id = image_ids[i + j]
+                    label = labels[i + j]
                     heatmap_np = heatmap.cpu().numpy()
                     
                     # Handle multi-channel heatmaps (take mean if needed)
                     if heatmap_np.ndim == 3:
                         heatmap_np = np.mean(heatmap_np, axis=0)
                     
+                    # Get category name for ImageNet
+                    category_name = None
+                    if dataset_name == "imagenet" and self.imagenet_mapping and self.synset_ids:
+                        try:
+                            if label < len(self.synset_ids):
+                                synset_id = self.synset_ids[label]
+                                category_name_full = self.imagenet_mapping.get(synset_id, "")
+                                if category_name_full:
+                                    category_name = format_class_for_llm(category_name_full)
+                        except Exception as e:
+                            logging.debug(f"Could not get category name for label {label}: {e}")
+                    
                     # Sort pixels by importance and save NPY
                     sorted_indices = sort_pixels(heatmap_np)
                     sorted_path = self.file_manager.get_sorted_heatmap_path(
-                        dataset_name, model_name, method_name, img_id
+                        dataset_name, model_name, method_name, img_id, category_name
                     )
                     self.file_manager.ensure_dir_exists(sorted_path.parent)
                     np.save(sorted_path, sorted_indices)
                     
                     # Save regular PNG heatmap
                     regular_path = self.file_manager.get_regular_heatmap_path(
-                        dataset_name, model_name, method_name, img_id
+                        dataset_name, model_name, method_name, img_id, category_name
                     )
                     self.file_manager.ensure_dir_exists(regular_path.parent)
                     self._save_heatmap_png(heatmap_np, regular_path)

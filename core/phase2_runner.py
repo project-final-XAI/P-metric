@@ -174,10 +174,35 @@ class Phase2Runner:
             if occluded_path.exists():
                 continue
             
-            # Load sorted indices
-            sorted_path = self.file_manager.get_sorted_heatmap_path(
-                dataset_name, model_name, method_name, img_id
-            )
+            # Load sorted indices - try with category name first (for ImageNet), then fallback to old format
+            sorted_path = None
+            if dataset_name == "imagenet":
+                # Try to get category name from label
+                try:
+                    from data.imagenet_class_mapping import get_cached_mapping, format_class_for_llm
+                    from config import DATASET_CONFIG
+                    import os
+                    mapping = get_cached_mapping()
+                    dataset_path = DATASET_CONFIG.get("imagenet", {}).get("path")
+                    if dataset_path and os.path.exists(dataset_path):
+                        synset_ids = sorted([d for d in os.listdir(dataset_path) 
+                                            if os.path.isdir(os.path.join(dataset_path, d))])
+                        if label < len(synset_ids):
+                            synset_id = synset_ids[label]
+                            category_name_full = mapping.get(synset_id, "")
+                            if category_name_full:
+                                category_name = format_class_for_llm(category_name_full)
+                                sorted_path = self.file_manager.get_sorted_heatmap_path(
+                                    dataset_name, model_name, method_name, img_id, category_name
+                                )
+                except Exception:
+                    pass
+            
+            # Fallback to old format if not found
+            if sorted_path is None or not sorted_path.exists():
+                sorted_path = self.file_manager.get_sorted_heatmap_path(
+                    dataset_name, model_name, method_name, img_id
+                )
             
             if not sorted_path.exists():
                 logging.warning(f"Missing sorted heatmap: {sorted_path}")
