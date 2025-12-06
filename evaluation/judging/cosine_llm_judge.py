@@ -6,7 +6,7 @@ cosine similarity of embeddings. More flexible than exact matching.
 """
 import logging
 import numpy as np
-from typing import Tuple
+from typing import Tuple, Union
 from pathlib import Path
 
 import ollama
@@ -198,17 +198,19 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
 
         return int(best_idx), float(max_similarity)
 
-    def _predict_single_image_from_path(
+    def _predict_single_image(
             self,
-            image_path: str,
+            image_data: Union[str, bytes],
             true_label: int,
             img_index: int
     ) -> Tuple[int, int, float]:
         """
-        Predict class for a single image using open-ended question (optimized - uses file path directly).
+        Predict class for a single image using open-ended question (optimized - in-memory processing).
+        
+        Accepts both file paths and base64-encoded image strings.
         
         Args:
-            image_path: Path to image file (PNG/JPG)
+            image_data: Image file path (str) or base64-encoded image string (str)
             true_label: True class label (for logging purposes)
             img_index: Original index in batch
             
@@ -225,7 +227,7 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
             # Use shared retry helper method
             response_text = self._call_ollama_with_retry(
                 prompt=prompt,
-                image_path=image_path,
+                image_data=image_data,
                 max_retries=3,
                 temperature=self.temperature
             )

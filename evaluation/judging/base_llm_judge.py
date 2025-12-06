@@ -7,7 +7,9 @@ Provides common methods for all LLM-based judges to avoid code duplication.
 import logging
 import numpy as np
 import os
-from typing import List, Dict, Union, Any
+import base64
+import io
+from typing import List, Dict, Union, Any, Optional
 from abc import abstractmethod
 import ollama  # Import once at module level for better performance
 
@@ -22,8 +24,12 @@ logging.getLogger("httpcore.http11").setLevel(logging.CRITICAL)
 logging.getLogger("httpcore.connection").setLevel(logging.CRITICAL)
 
 
-# Maximum parallel workers for all LLM judges
-MAX_PARALLEL_WORKERS = 24
+# Maximum parallel workers for all LLM judges (aligned with OLLAMA_NUM_PARALLEL=16)
+MAX_PARALLEL_WORKERS = 16
+
+# Ollama optimization constants
+OLLAMA_KEEP_ALIVE = "5m"  # Keep model in memory for 5 minutes to prevent reloading
+OLLAMA_NUM_CTX = 8192  # Context window size for llama3.2-vision 
 
 
 class BaseLLMJudge(JudgingModel):
@@ -34,6 +40,8 @@ class BaseLLMJudge(JudgingModel):
     - Loading class names from dataset
     - Loading ImageNet class mapping (synset ID -> readable name)
     - Formatting class names for LLM prompts
+    - Optimized image conversion (hybrid I/O: paths vs base64)
+    - Efficient Ollama API calls with keep_alive and num_ctx
     """
     
     def __init__(self, model_name: str, dataset_name: str = "imagenet"):
@@ -122,6 +130,7 @@ class BaseLLMJudge(JudgingModel):
         Format class name for natural language prompt.
         
         Converts synset IDs to readable names for ImageNet.
+        Ensures simple English labels (strips Latin names after comma).
         
         Args:
             class_name: Raw class name (e.g., 'n01440764' or 'Dyskeratotic')
@@ -132,26 +141,26 @@ class BaseLLMJudge(JudgingModel):
         # Try to get readable name from mapping (for ImageNet synsets)
         if class_name in self.class_name_mapping:
             readable_name = self.class_name_mapping[class_name]
-            # Format for LLM: take first part if there's a comma
+            # Format for LLM: take first part if there's a comma (strips Latin names)
             return format_class_for_llm(readable_name)
         
         # Replace underscores with spaces for other datasets
         return class_name.replace('_', ' ')
     
     @abstractmethod
-    def _predict_single_image_from_path(
+    def _predict_single_image(
         self,
-        image_path: str,
+        image_data: Union[str, bytes],
         true_label: int,
         img_index: int
     ):
         """
-        Predict class for a single image using file path directly (optimized).
+        Predict class for a single image using image data (path or base64 string).
         
-        Must be implemented by subclasses. This avoids unnecessary tensor conversions.
+        Must be implemented by subclasses. This avoids unnecessary disk I/O.
         
         Args:
-            image_path: Path to image file (PNG/JPG)
+            image_data: Image file path (str) or base64-encoded image string (str)
             true_label: True class label
             img_index: Original index in batch
             
@@ -163,25 +172,32 @@ class BaseLLMJudge(JudgingModel):
     def _call_ollama_with_retry(
         self,
         prompt: str,
-        image_path: str,
+        image_data: Union[str, bytes],
         max_retries: int = 3,
-        **ollama_options
+        temperature: float = 0.0,
+        format_schema: Optional[Dict] = None,
+        **additional_options
     ) -> str:
         """
         Call Ollama API with retry logic (shared helper method).
         
         Optimized with:
+        - keep_alive to prevent model reloading (CRITICAL for throughput)
+        - num_ctx for optimal context window
         - Smart exponential backoff (longer delays for connection errors)
         - Timeout handling
         - Better error classification
         - No import overhead (ollama imported at module level)
+        - In-memory image processing (no disk I/O)
         
         Args:
             prompt: Prompt text for LLM
-            image_path: Path to image file
+            image_data: Image file path (str) or base64-encoded image string (str)
             max_retries: Maximum number of retry attempts
-            **ollama_options: Additional options for Ollama (temperature, etc.)
-            
+            temperature: Temperature for LLM (0.0 = deterministic)
+            format_schema: Optional Pydantic JSON schema for structured outputs
+            **additional_options: Additional options for Ollama
+        
         Returns:
             Response text from LLM
             
@@ -190,23 +206,38 @@ class BaseLLMJudge(JudgingModel):
         """
         import time
         
+        # Build optimized Ollama options
+        ollama_options = {
+            'temperature': temperature,
+            'num_ctx': OLLAMA_NUM_CTX,
+            **additional_options  # Allow override of defaults
+        }
+        
         last_exception = None
         
         for attempt in range(max_retries):
             try:
-                # Direct call - ollama already imported at module level
+                # Build messages list
+                messages = [
+                    {
+                        'role': 'user',
+                        'content': prompt,
+                        'images': [image_data]
+                    }
+                ]
+                
+                # Call Ollama with keep_alive to prevent model reloading
+                # This is CRITICAL for throughput - without it, model reloads on each call
                 response = ollama.chat(
                     model=self.ollama_model_name,
-                    messages=[
-                        {
-                            'role': 'user',
-                            'content': prompt,
-                            'images': [image_path]
-                        }
-                    ],
-                    options=ollama_options
+                    messages=messages,
+                    options=ollama_options,
+                    keep_alive=OLLAMA_KEEP_ALIVE,  # Keep model in memory
+                    format=format_schema  # Optional JSON schema for structured outputs
                 )
+                
                 return response.message.content.strip()
+                
             except Exception as e:
                 last_exception = e
                 error_str = str(e).lower()
@@ -232,6 +263,137 @@ class BaseLLMJudge(JudgingModel):
         # Should not reach here, but just in case
         raise last_exception if last_exception else Exception("Unknown error in Ollama call")
     
+    def _convert_image_to_base64(self, img: Any) -> Union[str, bytes]:
+        """
+        Convert an image (Tensor/Numpy/PIL/Path) to base64-encoded string or keep as path.
+        
+        Hybrid I/O optimization:
+        - If input is a path -> keep as path (Ollama handles paths efficiently)
+        - If input is Tensor/PIL/NumPy -> convert to base64 in RAM (no disk writes)
+        
+        Optimized for in-memory processing - no disk I/O.
+        
+        Args:
+            img: Input image - can be:
+                 - File path (str or Path) - will be kept as path for Ollama
+                 - PIL Image
+                 - NumPy array
+                 - PyTorch Tensor
+        
+        Returns:
+            Base64-encoded image string (for tensors/arrays/PIL) or file path (for paths)
+        """
+        from pathlib import Path
+        
+        # If already a path, keep it as-is (Ollama handles paths efficiently)
+        if isinstance(img, (str, Path)):
+            path_str = str(img)
+            # Verify path exists (for better error messages)
+            if not os.path.exists(path_str):
+                raise FileNotFoundError(f"Image path does not exist: {path_str}")
+            return path_str
+        
+        # Convert to PIL Image (in-memory, no disk I/O)
+        try:
+            from PIL import Image
+            
+            if hasattr(img, 'save') and hasattr(img, 'size'):
+                # Already a PIL Image
+                pil_img = img
+            elif isinstance(img, np.ndarray):
+                # NumPy array - optimize conversion
+                if img.dtype != np.uint8:
+                    # Normalize if needed (assuming 0-1 range)
+                    if img.max() <= 1.0:
+                        img = (img * 255).astype(np.uint8)
+                    else:
+                        img = np.clip(img, 0, 255).astype(np.uint8)
+                
+                # Handle shape conversion
+                if img.ndim == 2:
+                    # Grayscale -> RGB
+                    pil_img = Image.fromarray(img, mode='L').convert('RGB')
+                elif img.ndim == 3:
+                    if img.shape[2] == 1:
+                        # (H, W, 1) -> RGB
+                        pil_img = Image.fromarray(img[:, :, 0], mode='L').convert('RGB')
+                    elif img.shape[2] == 3:
+                        # (H, W, 3) -> RGB
+                        pil_img = Image.fromarray(img, mode='RGB')
+                    else:
+                        raise ValueError(f"Unsupported array shape: {img.shape}")
+                else:
+                    raise ValueError(f"Unsupported array dimensions: {img.ndim}")
+            else:
+                # Assume it's a tensor-like object
+                import torch
+                if isinstance(img, torch.Tensor):
+                    # Convert tensor to numpy then PIL (optimized)
+                    # Move to CPU if needed (non-blocking for better performance)
+                    if img.is_cuda:
+                        img_np = img.detach().cpu().numpy()
+                    else:
+                        img_np = img.detach().numpy()
+                    
+                    # Handle different tensor shapes
+                    if img_np.ndim == 2:
+                        # (H, W) -> RGB
+                        img_np = np.clip(img_np, 0, 255).astype(np.uint8)
+                        pil_img = Image.fromarray(img_np, mode='L').convert('RGB')
+                    elif img_np.ndim == 3:
+                        # (C, H, W) -> (H, W, C)
+                        if img_np.shape[0] == 3 or img_np.shape[0] == 1:
+                            img_np = img_np.transpose(1, 2, 0)
+                            if img_np.shape[2] == 1:
+                                img_np = img_np[:, :, 0]
+                                pil_img = Image.fromarray(img_np, mode='L').convert('RGB')
+                            else:
+                                # Normalize if needed (assuming 0-1 range for normalized tensors)
+                                if img_np.max() <= 1.0:
+                                    img_np = (img_np * 255).astype(np.uint8)
+                                else:
+                                    img_np = np.clip(img_np, 0, 255).astype(np.uint8)
+                                pil_img = Image.fromarray(img_np, mode='RGB')
+                        else:
+                            # (H, W, C) already
+                            if img_np.max() <= 1.0:
+                                img_np = (img_np * 255).astype(np.uint8)
+                            else:
+                                img_np = np.clip(img_np, 0, 255).astype(np.uint8)
+                            pil_img = Image.fromarray(img_np, mode='RGB')
+                    elif img_np.ndim == 4:
+                        # (B, C, H, W) -> take first image
+                        img_np = img_np[0].transpose(1, 2, 0)
+                        # Normalize if needed
+                        if img_np.max() <= 1.0:
+                            img_np = (img_np * 255).astype(np.uint8)
+                        else:
+                            img_np = np.clip(img_np, 0, 255).astype(np.uint8)
+                        pil_img = Image.fromarray(img_np, mode='RGB')
+                    else:
+                        raise ValueError(f"Unsupported tensor shape: {img_np.shape}")
+                else:
+                    raise ValueError(f"Unsupported image type: {type(img)}")
+            
+            # Save PIL Image to BytesIO buffer (in-memory, no disk I/O)
+            buffer = io.BytesIO()
+            # Use PNG format for lossless compression
+            pil_img.save(buffer, format='PNG', optimize=False)  # optimize=False for speed
+            buffer.seek(0)
+            
+            # Encode to base64 string
+            img_bytes = buffer.getvalue()
+            base64_str = base64.b64encode(img_bytes).decode('utf-8')
+            
+            # Clean up buffer
+            buffer.close()
+            
+            return base64_str
+            
+        except Exception as e:
+            logging.error(f"Failed to convert image to base64: {e}")
+            raise
+    
     def predict(
         self,
         images: Union[List, np.ndarray, Any],
@@ -240,14 +402,15 @@ class BaseLLMJudge(JudgingModel):
         """
         Predict classes for given images (required by JudgingModel interface).
         
-        For LLM judges, this method accepts image paths (strings or Path objects).
-        If tensors are provided, they will be saved temporarily to disk.
+        Optimized for in-memory processing - no disk I/O. Converts images to base64
+        strings in memory for maximum performance.
         
         Args:
             images: Input images - can be:
-                   - List of image file paths (str or Path)
-                   - List of PIL Images
-                   - Other formats (will attempt conversion)
+                   - List of image file paths (str or Path) - kept as paths
+                   - List of PIL Images - converted to base64
+                   - List of NumPy arrays - converted to base64
+                   - List of PyTorch Tensors - converted to base64
             **kwargs: Additional parameters:
                     - true_labels: List of true labels (optional)
                     - shared_executor: ThreadPoolExecutor for parallel processing (optional)
@@ -255,114 +418,65 @@ class BaseLLMJudge(JudgingModel):
         Returns:
             Array of predicted class indices (shape: [batch_size])
         """
-        from pathlib import Path
-        import tempfile
-        
         # Extract true_labels from kwargs if provided
         true_labels = kwargs.get('true_labels', None)
         shared_executor = kwargs.get('shared_executor', None)
         
-        # Convert images to paths
-        image_paths = []
-        temp_files = []  # Track temporary files for cleanup
+        # Convert images to base64 strings or keep paths (in-memory, no disk I/O)
+        image_data_list = []
         
-        try:
-            for img in images:
-                if isinstance(img, (str, Path)):
-                    # Already a path
-                    image_paths.append(str(img))
-                elif hasattr(img, 'save'):
-                    # PIL Image or similar - save to temp file
-                    temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-                    img.save(temp_file.name)
-                    image_paths.append(temp_file.name)
-                    temp_files.append(temp_file.name)
-                else:
-                    # Try to convert to PIL Image and save
-                    try:
-                        from PIL import Image
-                        if isinstance(img, np.ndarray):
-                            pil_img = Image.fromarray(img)
-                        else:
-                            # Assume it's a tensor-like object
-                            import torch
-                            if isinstance(img, torch.Tensor):
-                                # Convert tensor to numpy then PIL
-                                img_np = img.cpu().numpy()
-                                if img_np.ndim == 3:
-                                    # (C, H, W) -> (H, W, C)
-                                    img_np = img_np.transpose(1, 2, 0)
-                                elif img_np.ndim == 4:
-                                    # (B, C, H, W) -> take first image
-                                    img_np = img_np[0].transpose(1, 2, 0)
-                                # Normalize if needed (assuming 0-1 range)
-                                if img_np.max() <= 1.0:
-                                    img_np = (img_np * 255).astype(np.uint8)
-                                pil_img = Image.fromarray(img_np)
-                            else:
-                                raise ValueError(f"Unsupported image type: {type(img)}")
-                        
-                        temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-                        pil_img.save(temp_file.name)
-                        image_paths.append(temp_file.name)
-                        temp_files.append(temp_file.name)
-                    except Exception as e:
-                        logging.error(f"Failed to convert image to path: {e}")
-                        # Create a dummy path that will fail gracefully
-                        image_paths.append("")
-            
-            # Use predict_from_paths for actual prediction
-            return self.predict_from_paths(image_paths, true_labels=true_labels, shared_executor=shared_executor, **kwargs)
+        for img in images:
+            try:
+                image_data = self._convert_image_to_base64(img)
+                image_data_list.append(image_data)
+            except Exception as e:
+                logging.error(f"Failed to convert image: {e}")
+                # Create a dummy entry that will fail gracefully
+                image_data_list.append("")
         
-        finally:
-            # Clean up temporary files
-            for temp_file in temp_files:
-                try:
-                    import os
-                    if os.path.exists(temp_file):
-                        os.unlink(temp_file)
-                except Exception as e:
-                    logging.warning(f"Failed to delete temp file {temp_file}: {e}")
+        # Use predict_from_data for actual prediction
+        return self.predict_from_data(image_data_list, true_labels=true_labels, shared_executor=shared_executor, **kwargs)
     
-    def predict_from_paths(self, image_paths: List[str], true_labels: List[int] = None, shared_executor=None, **kwargs) -> np.ndarray:
+    def predict_from_data(self, image_data_list: List[Union[str, bytes]], true_labels: List[int] = None, shared_executor=None, **kwargs) -> np.ndarray:
         """
-        Predict classes for images given as file paths (optimized for LLM judges).
+        Predict classes for images given as file paths or base64 strings (optimized for LLM judges).
         
-        This method avoids unnecessary tensor conversions when images are already on disk.
-        Uses parallel processing with adaptive worker count for better performance.
+        This method uses in-memory processing - no disk I/O. Accepts both file paths
+        and base64-encoded image strings. Uses parallel processing with adaptive worker count.
         
         Optimizations:
+        - In-memory processing (no disk I/O)
         - Adaptive worker count based on batch size
         - Better error handling and recovery
         - Progress tracking for large batches
         
         Args:
-            image_paths: List of image file paths (PNG/JPG)
+            image_data_list: List of image file paths (str) or base64-encoded image strings (str)
             true_labels: List of true labels (optional)
             **kwargs: Additional parameters
             
         Returns:
             Array of predicted class indices (shape: [batch_size])
         """
-        if len(image_paths) == 0:
+        if len(image_data_list) == 0:
             return np.array([], dtype=np.int64)
 
         # Get true labels if provided
         if true_labels is None:
-            true_labels = [0] * len(image_paths)  # Fallback
-        elif len(true_labels) != len(image_paths):
+            true_labels = [0] * len(image_data_list)  # Fallback
+        elif len(true_labels) != len(image_data_list):
             logging.warning(
-                f"true_labels length ({len(true_labels)}) doesn't match image_paths length ({len(image_paths)}). "
+                f"true_labels length ({len(true_labels)}) doesn't match image_data_list length ({len(image_data_list)}). "
                 f"Using fallback."
             )
-            true_labels = [0] * len(image_paths)
+            true_labels = [0] * len(image_data_list)
 
         # Use shared executor if provided, otherwise create new one
         # Shared executor eliminates overhead between batches - CRITICAL for performance!
-        batch_size = len(image_paths)
+        batch_size = len(image_data_list)
         max_workers = min(MAX_PARALLEL_WORKERS, batch_size)
         
-        predictions = [None] * len(image_paths)
+        predictions = [None] * len(image_data_list)
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
         
@@ -377,8 +491,8 @@ class BaseLLMJudge(JudgingModel):
         try:
             # Submit all tasks immediately
             future_to_idx = {
-                executor.submit(self._predict_single_image_from_path, path, true_labels[idx], idx): idx
-                for idx, path in enumerate(image_paths)
+                executor.submit(self._predict_single_image, image_data, true_labels[idx], idx): idx
+                for idx, image_data in enumerate(image_data_list)
             }
 
             # Process results as they complete (out-of-order is fine, we track by idx)
@@ -398,4 +512,18 @@ class BaseLLMJudge(JudgingModel):
                 executor.shutdown(wait=False)
 
         return np.array(predictions, dtype=np.int64)
-
+    
+    # Backward compatibility alias
+    def predict_from_paths(self, image_paths: List[str], true_labels: List[int] = None, shared_executor=None, **kwargs) -> np.ndarray:
+        """
+        Backward compatibility method - redirects to predict_from_data.
+        
+        Args:
+            image_paths: List of image file paths
+            true_labels: List of true labels (optional)
+            **kwargs: Additional parameters
+            
+        Returns:
+            Array of predicted class indices (shape: [batch_size])
+        """
+        return self.predict_from_data(image_paths, true_labels=true_labels, shared_executor=shared_executor, **kwargs)
