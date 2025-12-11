@@ -69,17 +69,10 @@ class ClassIdLLMJudge(BaseLLMJudge):
                 logging.warning(f"Invalid true_label {true_label} for image {img_index}. Using fallback.")
                 return (img_index, -1)
             
-            # Build a class list for grounding the model (index -> class name)
-            class_list = "\n".join(
-                [f"{i}: {self.class_names[i]}" for i in range(min(1000, len(self.class_names)))]
-            )
-
             # Prompt the LLM to return a class index 0-999 for ImageNet
             prompt = (
-                "You are given the 1000 classes of the ImageNet database, indexed 0-999 as follows:\n"
-                f"{class_list}\n"
-                "Look at the provided image and return a single integer from 0-999 representing "
-                "the corresponding class index. Return only the integer."
+                "Look at the provided image and return a single integer from 0-999 "
+                "representing the corresponding ImageNet class index. Return only the integer."
             )
 
             # Call Ollama with structured outputs using shared retry helper
@@ -88,7 +81,8 @@ class ClassIdLLMJudge(BaseLLMJudge):
                 image_data=image_data,
                 max_retries=3,
                 temperature=self.temperature,
-                format_schema=ClassIdResponse.model_json_schema()
+                format_schema=ClassIdResponse.model_json_schema(),
+                classes_names=self.class_names
             )
 
             # Parse structured response with robust error handling
