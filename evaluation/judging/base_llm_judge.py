@@ -225,6 +225,7 @@ class BaseLLMJudge(JudgingModel):
         max_retries: int = 3,
         temperature: float = 0.0,
         format_schema: Optional[Dict] = None,
+        classes_names: Optional[List[str]] = None,
         **additional_options
     ) -> str:
         """
@@ -287,7 +288,21 @@ class BaseLLMJudge(JudgingModel):
         for attempt in range(max_retries):
             try:
                 # Build messages list
-                messages = [
+                messages = []
+                
+                # Optional system grounding with class names (indexed list)
+                if classes_names:
+                    class_list = "\n".join(
+                        f"{i}: {name}" for i, name in enumerate(classes_names[:1000])
+                    )
+                    system_prompt = (
+                        "You are given the following classes indexed from 0 upward:\n"
+                        f"{class_list}\n"
+                        "Use these class indices when responding."
+                    )
+                    messages.append({'role': 'system', 'content': system_prompt})
+                
+                messages.append(
                     {
                         'role': 'system',
                         'content': self.system_prompt
@@ -297,7 +312,7 @@ class BaseLLMJudge(JudgingModel):
                         'content': prompt,
                         'images': [image_data]
                     }
-                ]
+                )
                 
                 response = ollama.chat(
                     model=self.ollama_model_name,
