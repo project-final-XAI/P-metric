@@ -49,7 +49,7 @@ HEATMAP_BATCH_SIZE = 12
 PHASE2_BATCH_SIZE = 128  # Batch size for Phase 2 occlusion processing (GPU)
 PHASE2_SAVE_WORKERS = 4  # Number of workers for parallel image saving (CPU)
 PHASE3_BATCH_SIZE_PYTORCH = 512  # Batch size for Phase 3 PyTorch model evaluation (GPU) - increased for better GPU utilization
-PHASE3_BATCH_SIZE_LLM = 32  # Batch size for Phase 3 LLM model evaluation (CPU/API) - smaller batches = continuous processing, no gaps
+PHASE3_BATCH_SIZE_LLM = 1  # Batch size for Phase 3 LLM model evaluation (CPU/API) - smaller batches = continuous processing, no gaps
 PHASE3_LOAD_WORKERS = 8  # Number of workers for parallel image loading in Phase 3
 
 # -----------------
@@ -105,7 +105,7 @@ GENERATING_MODELS = [
 
 # Models used for evaluating occluded images (Phase 2)
 JUDGING_MODELS = [
-    "resnet50",
+    # "resnet50",
     # "mobilenet_v2",
 
     # "vit_b_16",
@@ -114,7 +114,7 @@ JUDGING_MODELS = [
     # "sipakmed_efficientnetB0.pth"
     # "sipakmed_cropped_efficientnet.pth",
 
-    # "llama3.2-vision-binary",
+    "llama3.2-vision-binary",
     # "llama3.2-vision-cosine",
 ]
 
@@ -123,24 +123,25 @@ JUDGING_MODELS = [
 # -----------------
 ATTRIBUTION_METHODS = [
     "saliency",
-    "inputxgradient",
-    "smoothgrad",
-    "guided_backprop",
+    # "inputxgradient",
+    # "smoothgrad",
+    # "guided_backprop",
     "integrated_gradients",
     "occlusion",
     "gradientshap",
-    "xrai",
+    # "xrai",
     "grad_cam",
     "guided_gradcam",
     "random_baseline",
-    "c3f",
+    # "c3f",
 ]
 
 # -----------------
 # Occlusion Configuration
 # -----------------
 # Occlusion levels (percentages) to evaluate
-OCCLUSION_LEVELS = list(range(0, 100, 5))
+# OCCLUSION_LEVELS = list[int](range(0, 100, 20)) + [90, 95,98,100]
+OCCLUSION_LEVELS =  [20, 40, 60, 80, 95,100]
 
 # Fill strategies for occluded pixels
 FILL_STRATEGIES = [

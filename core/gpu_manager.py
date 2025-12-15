@@ -66,7 +66,6 @@ class GPUManager:
         Check if the current GPU architecture supports fast FP16 math.
         
         Volta (compute capability 7.0) and above have native FP16 support.
-        Modern RTX GPUs (Turing, Ampere, Ada) are supported.
         
         Returns:
             True if GPU supports FP16, False otherwise
@@ -98,7 +97,7 @@ class GPUManager:
         # Base batch sizes for each attribution method
         # These are conservative defaults that work on most GPUs
         base_sizes = {
-            "saliency": 32,
+            "saliency": 128,
             "inputxgradient": 64,
             "smoothgrad": 24,
             "guided_backprop": 64,
@@ -114,7 +113,7 @@ class GPUManager:
         
         # Scale based on GPU memory, but keep batch_size=1 methods unchanged
         # Methods like C3F require batch_size=1 and should not be scaled
-        if self.gpu_memory_gb >= 24:
+        if self.gpu_memory_gb >= 22:
             # High-VRAM GPUs can handle 2x base sizes
             return {k: (v if v == 1 else int(v * 2.0)) for k, v in base_sizes.items()}
         elif self.gpu_memory_gb > 16:

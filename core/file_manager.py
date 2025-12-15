@@ -185,7 +185,7 @@ class FileManager:
             method /
             f"{strategy}.csv"
         )
-    
+
     # ==================== I/O Operations ====================
     
     def ensure_dir_exists(self, path: Path) -> None:

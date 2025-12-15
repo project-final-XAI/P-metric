@@ -10,7 +10,7 @@ Most efficient and straightforward evaluation method.
 Optimized for high-throughput inference with llama3.2-vision via Ollama.
 """
 import logging
-from typing import Tuple, Union
+from typing import Tuple, Union, Optional
 from pydantic import BaseModel, ValidationError
 
 from evaluation.judging.base_llm_judge import BaseLLMJudge
@@ -38,6 +38,8 @@ class BinaryLLMJudge(BaseLLMJudge):
     - Robust error handling and validation
     """
 
+    SYSTEM_PROMPT = "You are an image classifier. Use the ImageNet categories to classify images. return as JSON"
+
     def __init__(self, model_name: str, dataset_name: str = "imagenet", temperature: float = 0.0):
         """
         Initialize Binary LLM Judge.
@@ -47,7 +49,7 @@ class BinaryLLMJudge(BaseLLMJudge):
             dataset_name: Dataset name to get class names from
             temperature: Temperature for LLM (0.0 = deterministic, recommended)
         """
-        super().__init__(model_name, dataset_name)
+        super().__init__(model_name, dataset_name, system_prompt=self.SYSTEM_PROMPT)
         self.temperature = temperature
         logging.info(f"BinaryLLMJudge initialized with {len(self.class_names)} classes, temperature={temperature}")
 
@@ -55,8 +57,9 @@ class BinaryLLMJudge(BaseLLMJudge):
             self,
             image_data: Union[str, bytes],
             true_label: int,
-            img_index: int
-    ) -> Tuple[int, int]:
+            image_id: str,
+            context: Optional[dict] = None
+    ) -> Tuple[str, int, str, str, str, Union[int, str], Union[str, int], str]:
         """
         Predict class for a single image using binary yes/no question (optimized - in-memory processing).
         
@@ -66,16 +69,23 @@ class BinaryLLMJudge(BaseLLMJudge):
         Args:
             image_data: Image file path (str) or base64-encoded image string (str)
             true_label: True class label
-            img_index: Original index in batch
+            image_id: Stable identifier for the image (e.g., file stem)
+            context: Optional metadata (occlusion level, fill strategy, etc.)
             
         Returns:
-            Tuple of (img_index, predicted_class_index)
+            Tuple of (image_id, predicted_class_index)
         """
         try:
+            context = context or {}
+            occl = context.get("occlusion_level", "?")
+            strategy = context.get("fill_strategy", "?")
+            method = context.get("method", "?")
+            
             # Validate true_label
             if true_label < 0 or true_label >= len(self.class_names):
-                logging.warning(f"Invalid true_label {true_label} for image {img_index}. Using fallback.")
-                return (img_index, -1)
+                logging.warning(f"Invalid true_label {true_label} for image {image_id}. Using fallback.")
+                # Return consistent 8-tuple with error marker
+                return (image_id, -1, "invalid_label", "error", "unknown", occl, strategy, "")
             
             # Get the true class name and format it (strips Latin names after comma)
             class_name = self._format_class_name(self.class_names[true_label])
@@ -98,7 +108,7 @@ class BinaryLLMJudge(BaseLLMJudge):
                 result = ValidationResponse.model_validate_json(response_text)
             except ValidationError as e:
                 # Fallback: try to parse as plain text if JSON parsing fails
-                logging.warning(f"JSON parsing failed for image {img_index}, attempting text fallback: {e}")
+                logging.warning(f"JSON parsing failed for image {image_id}, attempting text fallback: {e}")
                 response_lower = response_text.lower().strip()
                 # Simple heuristic: look for "yes" or "no" in response
                 if any(word in response_lower for word in ['yes', 'true', 'correct', 'match']):
@@ -107,21 +117,24 @@ class BinaryLLMJudge(BaseLLMJudge):
                     result = ValidationResponse(is_match=False)
                 else:
                     # Default to False if unclear
-                    logging.warning(f"Unclear response for image {img_index}: '{response_text}'. Defaulting to False.")
+                    logging.warning(f"Unclear response for image {image_id}: '{response_text}'. Defaulting to False.")
                     result = ValidationResponse(is_match=False)
 
-            # If LLM says match, it correctly identified the class
-            # If LLM says no match, it failed to identify the class
+            # Compact response for logging
+            response_clean = " ".join(response_text.split())
+
+            # Clean, readable log format: level% - category - method - fill: {response} -> YES/NO
             if result.is_match:
-                logging.debug(f"Image {img_index} ({class_name}): LLM confirmed match")
-                return img_index, true_label  # Correct!
+                logging.info(f"{occl}% - {class_name} - {method} - {strategy}: {response_clean} -> YES")
+                return image_id, true_label, response_clean, "yes", class_name, occl, strategy, prompt  # Correct!
             else:
                 # Return a different class to mark as incorrect
-                # Use modulo to ensure valid index
                 wrong_class = (true_label + 1) % len(self.class_names)
-                logging.debug(f"Image {img_index} ({class_name}): LLM said no match, returning class {wrong_class}")
-                return img_index, wrong_class  # Incorrect!
+                logging.info(f"{occl}% - {class_name} - {method} - {strategy}: {response_clean} -> NO")
+                return image_id, wrong_class, response_clean, "no", class_name, occl, strategy, prompt  # Incorrect!
 
         except Exception as e:
-            logging.error(f"Error predicting image {img_index} with BinaryLLMJudge: {e}")
-            return (img_index, -1)
+            logging.error(f"Error predicting image {image_id} with BinaryLLMJudge: {e}")
+            # Return consistent 8-tuple with error marker (-1 for predicted class)
+            context = context or {}
+            return (image_id, -1, str(e), "error", "unknown", context.get("occlusion_level", "?"), context.get("fill_strategy", "?"), "")

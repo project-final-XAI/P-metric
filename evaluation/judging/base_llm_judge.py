@@ -9,6 +9,7 @@ import numpy as np
 import os
 import base64
 import io
+from pathlib import Path
 from typing import List, Dict, Union, Any, Optional
 from abc import abstractmethod
 import ollama  # Import once at module level for better performance
@@ -28,8 +29,22 @@ logging.getLogger("httpcore.connection").setLevel(logging.CRITICAL)
 MAX_PARALLEL_WORKERS = 16
 
 # Ollama optimization constants
-OLLAMA_KEEP_ALIVE = "5m"  # Keep model in memory for 5 minutes to prevent reloading
-OLLAMA_NUM_CTX = 8192  # Context window size for llama3.2-vision 
+# IMPORTANT: keep_alive=0 gives best accuracy but is ~3x slower
+# Alternative: Use periodic resets (see OLLAMA_RESET_INTERVAL)
+OLLAMA_KEEP_ALIVE = None  # Force model unload (None = immediate unload) for max accuracy (prevents KV cache degradation)
+OLLAMA_NUM_CTX = 8192  # Context window size for llama3.2-vision
+OLLAMA_SEED = 42  # Fixed seed for deterministic results (critical for reproducibility!)
+
+# Periodic reset configuration (alternative to keep_alive=0)
+# Set OLLAMA_KEEP_ALIVE to "5m" and use reset every N requests for speed/accuracy balance
+OLLAMA_RESET_INTERVAL = 50  # Reset model state every N requests (0 = disabled) 
+
+# Default system prompt for all LLM judges
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a precise vision classification assistant. "
+    "Answer concisely based only on the provided image and follow any "
+    "response schema when requested."
+)
 
 
 class BaseLLMJudge(JudgingModel):
@@ -44,7 +59,12 @@ class BaseLLMJudge(JudgingModel):
     - Efficient Ollama API calls with keep_alive and num_ctx
     """
     
-    def __init__(self, model_name: str, dataset_name: str = "imagenet"):
+    def __init__(
+        self,
+        model_name: str,
+        dataset_name: str = "imagenet",
+        system_prompt: Optional[str] = None
+    ):
         """
         Initialize base LLM judge.
         
@@ -54,6 +74,10 @@ class BaseLLMJudge(JudgingModel):
         """
         super().__init__(model_name)
         self.dataset_name = dataset_name
+        self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+                
+        # Request counter for periodic reset (prevents KV cache degradation)
+        self._request_count = 0
         
         # Extract actual Ollama model name (remove -binary/-cosine suffix)
         # e.g., "llama3.2-vision-binary" -> "llama3.2-vision"
@@ -71,6 +95,9 @@ class BaseLLMJudge(JudgingModel):
         
         # Load ImageNet class mapping if needed
         self.class_name_mapping = self._load_class_mapping()
+        
+        # Log keep_alive configuration for verification
+        logging.info(f"BaseLLMJudge initialized: keep_alive={OLLAMA_KEEP_ALIVE}, seed={OLLAMA_SEED}")
     
     def _load_class_names(self) -> List[str]:
         """
@@ -93,7 +120,7 @@ class BaseLLMJudge(JudgingModel):
                 if dataset_path and os.path.exists(dataset_path):
                     temp_dataset = ImageFolder(root=str(dataset_path))
                     return temp_dataset.classes
-            except:
+            except Exception:
                 pass
             
             logging.warning("Could not load ImageNet class names from dataset.")
@@ -147,12 +174,33 @@ class BaseLLMJudge(JudgingModel):
         # Replace underscores with spaces for other datasets
         return class_name.replace('_', ' ')
     
+    def _reset_ollama_model(self):
+        """
+        Reset Ollama model to clear KV cache and prevent accuracy degradation.
+        
+        This is called periodically when OLLAMA_RESET_INTERVAL > 0.
+        Addresses known issue: ollama/ollama#4846
+        """
+        import subprocess
+        import time
+        try:
+            subprocess.run(
+                ["ollama", "stop", self.ollama_model_name],
+                capture_output=True,
+                timeout=10
+            )
+            time.sleep(1)  # Brief pause for clean unload
+            logging.debug(f"Reset Ollama model {self.ollama_model_name} to clear KV cache")
+        except Exception as e:
+            logging.warning(f"Failed to reset Ollama model: {e}")
+    
     @abstractmethod
     def _predict_single_image(
         self,
         image_data: Union[str, bytes],
         true_label: int,
-        img_index: int
+        image_id: str,
+        context: Optional[Dict] = None
     ):
         """
         Predict class for a single image using image data (path or base64 string).
@@ -162,7 +210,8 @@ class BaseLLMJudge(JudgingModel):
         Args:
             image_data: Image file path (str) or base64-encoded image string (str)
             true_label: True class label
-            img_index: Original index in batch
+            image_id: Stable identifier for the image (e.g., file stem)
+            context: Optional metadata (occlusion level, fill strategy, etc.)
             
         Returns:
             Tuple of (img_index, predicted_class_index) or (img_index, predicted_class_index, similarity)
@@ -206,9 +255,29 @@ class BaseLLMJudge(JudgingModel):
         """
         import time
         
+        # Periodic reset to prevent KV cache degradation (if enabled)
+        if OLLAMA_RESET_INTERVAL > 0 and OLLAMA_KEEP_ALIVE is not None and OLLAMA_KEEP_ALIVE != 0:
+            self._request_count += 1
+            if self._request_count >= OLLAMA_RESET_INTERVAL:
+                self._reset_ollama_model()
+                self._request_count = 0
+        
+        # Keep file paths as-is for Ollama (let Ollama handle loading)
+        # Only convert non-path data (PIL/Tensor/numpy) to base64
+        if isinstance(image_data, str):
+            if not os.path.exists(image_data):
+                # Assume it's already base64 - pass as-is
+                pass
+            # else: it's a valid file path - Ollama will load it directly
+        else:
+            # Convert in-memory data to base64
+            image_data = self._convert_image_to_base64(image_data)
+        
         # Build optimized Ollama options
+        # IMPORTANT: seed is critical for deterministic results!
         ollama_options = {
             'temperature': temperature,
+            'seed': OLLAMA_SEED,  # Fixed seed for reproducibility
             'num_ctx': OLLAMA_NUM_CTX,
             **additional_options  # Allow override of defaults
         }
@@ -220,14 +289,16 @@ class BaseLLMJudge(JudgingModel):
                 # Build messages list
                 messages = [
                     {
+                        'role': 'system',
+                        'content': self.system_prompt
+                    },
+                    {
                         'role': 'user',
                         'content': prompt,
                         'images': [image_data]
                     }
                 ]
                 
-                # Call Ollama with keep_alive to prevent model reloading
-                # This is CRITICAL for throughput - without it, model reloads on each call
                 response = ollama.chat(
                     model=self.ollama_model_name,
                     messages=messages,
@@ -285,13 +356,9 @@ class BaseLLMJudge(JudgingModel):
         """
         from pathlib import Path
         
-        # If already a path, keep it as-is (Ollama handles paths efficiently)
+        # If it's already a path, just return it as string - Ollama handles paths efficiently
         if isinstance(img, (str, Path)):
-            path_str = str(img)
-            # Verify path exists (for better error messages)
-            if not os.path.exists(path_str):
-                raise FileNotFoundError(f"Image path does not exist: {path_str}")
-            return path_str
+            return str(img)
         
         # Convert to PIL Image (in-memory, no disk I/O)
         try:
@@ -437,7 +504,16 @@ class BaseLLMJudge(JudgingModel):
         # Use predict_from_data for actual prediction
         return self.predict_from_data(image_data_list, true_labels=true_labels, shared_executor=shared_executor, **kwargs)
     
-    def predict_from_data(self, image_data_list: List[Union[str, bytes]], true_labels: List[int] = None, shared_executor=None, **kwargs) -> np.ndarray:
+    def predict_from_data(
+        self,
+        image_data_list: List[Union[str, bytes]],
+        true_labels: List[int] = None,
+        image_ids: List[str] = None,
+        context: Dict = None,
+        return_details: bool = False,
+        shared_executor=None,
+        **kwargs
+    ) -> np.ndarray:
         """
         Predict classes for images given as file paths or base64 strings (optimized for LLM judges).
         
@@ -471,12 +547,32 @@ class BaseLLMJudge(JudgingModel):
             )
             true_labels = [0] * len(image_data_list)
 
+        # Stable image ids for logging and traceability
+        if image_ids is None:
+            image_ids = [str(i) for i in range(len(image_data_list))]
+        elif len(image_ids) != len(image_data_list):
+            logging.warning(
+                f"image_ids length ({len(image_ids)}) doesn't match image_data_list length ({len(image_data_list)}). "
+                f"Using fallback."
+            )
+            image_ids = [str(i) for i in range(len(image_data_list))]
+
+        # Optional shared context per batch (occlusion level, fill strategy, etc.)
+        context = context or {}
+
         # Use shared executor if provided, otherwise create new one
         # Shared executor eliminates overhead between batches - CRITICAL for performance!
         batch_size = len(image_data_list)
-        max_workers = min(MAX_PARALLEL_WORKERS, batch_size)
+        
+        # When keep_alive=None or 0, process sequentially to allow model unload between requests
+        # Parallel processing prevents model unload because there's always another request using it
+        if OLLAMA_KEEP_ALIVE is None or OLLAMA_KEEP_ALIVE == 0:
+            max_workers = 1  # Sequential processing for keep_alive=None/0
+        else:
+            max_workers = min(MAX_PARALLEL_WORKERS, batch_size)
         
         predictions = [None] * len(image_data_list)
+        details = {} if return_details else None
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
         
@@ -491,7 +587,13 @@ class BaseLLMJudge(JudgingModel):
         try:
             # Submit all tasks immediately
             future_to_idx = {
-                executor.submit(self._predict_single_image, image_data, true_labels[idx], idx): idx
+                executor.submit(
+                    self._predict_single_image,
+                    image_data,
+                    true_labels[idx],
+                    image_ids[idx],
+                    context
+                ): idx
                 for idx, image_data in enumerate(image_data_list)
             }
 
@@ -499,9 +601,11 @@ class BaseLLMJudge(JudgingModel):
             for future in as_completed(future_to_idx):
                 try:
                     result = future.result()
-                    # Handle both (img_idx, class_idx) and (img_idx, class_idx, similarity) formats
-                    img_idx = result[0]
-                    predictions[img_idx] = result[1]
+                    # Handle both (img_id, class_idx) and extended tuples with extra metadata
+                    idx = future_to_idx[future]
+                    predictions[idx] = result[1]
+                    if return_details and len(result) > 2:
+                        details[idx] = result[2:]
                 except Exception as e:
                     idx = future_to_idx[future]
                     logging.error(f"Unexpected error processing image {idx}: {e}")
@@ -509,21 +613,45 @@ class BaseLLMJudge(JudgingModel):
         finally:
             # Only close executor if we created it
             if should_close_executor:
-                executor.shutdown(wait=False)
+                executor.shutdown(wait=True)  # Wait for all tasks to complete
 
+        if return_details:
+            return np.array(predictions, dtype=np.int64), details
         return np.array(predictions, dtype=np.int64)
     
     # Backward compatibility alias
-    def predict_from_paths(self, image_paths: List[str], true_labels: List[int] = None, shared_executor=None, **kwargs) -> np.ndarray:
+    def predict_from_paths(
+        self,
+        image_paths: List[str],
+        true_labels: List[int] = None,
+        image_ids: List[str] = None,
+        context: Dict = None,
+        return_details: bool = False,
+        shared_executor=None,
+        **kwargs
+    ) -> np.ndarray:
         """
         Backward compatibility method - redirects to predict_from_data.
         
         Args:
             image_paths: List of image file paths
             true_labels: List of true labels (optional)
+            image_ids: Optional list of stable ids (defaults to file stems)
+            context: Optional metadata passed to per-image predictor
             **kwargs: Additional parameters
             
         Returns:
             Array of predicted class indices (shape: [batch_size])
         """
-        return self.predict_from_data(image_paths, true_labels=true_labels, shared_executor=shared_executor, **kwargs)
+        if image_ids is None:
+            image_ids = [Path(p).stem for p in image_paths]
+
+        return self.predict_from_data(
+            image_paths,
+            true_labels=true_labels,
+            image_ids=image_ids,
+            context=context,
+            return_details=return_details,
+            shared_executor=shared_executor,
+            **kwargs
+        )

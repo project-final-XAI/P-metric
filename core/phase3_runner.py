@@ -171,8 +171,8 @@ class Phase3Runner:
         saved_results = set()
         items_since_save = 0
         last_save_time = time.time()
-        save_interval_items = 100
-        save_interval_seconds = 30
+        save_interval_items = 50
+        save_interval_seconds = 120
         
         # Count total images and create progress bar
         total_images_to_process = self._count_images_to_process(
@@ -206,7 +206,7 @@ class Phase3Runner:
             if is_llm_judge:
                 items_since_save, last_save_time, processed_count = self._evaluate_llm_level(
                     judge_model, images_to_process, labels_to_process, level,
-                    gen_model, method, results_by_level, saved_results,
+                    gen_model, method, strategy, results_by_level, saved_results,
                     completed_items, result_file, inner_pbar,
                     processed_count, start_time, total_images_to_process,
                     items_since_save, last_save_time, save_interval_items, save_interval_seconds
@@ -288,6 +288,7 @@ class Phase3Runner:
         level: int,
         gen_model: str,
         method: str,
+        strategy: str,
         results_by_level: Dict,
         saved_results: Set,
         completed_items: Set,
@@ -303,7 +304,19 @@ class Phase3Runner:
     ) -> Tuple[int, float, int]:
         """Evaluate a level using LLM judge (optimized pipeline processing)."""
         batch_size = getattr(self.config, 'PHASE3_BATCH_SIZE_LLM', 32)
-        batch_executor = ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_WORKERS, len(images_to_process) // batch_size + 1))
+        num_batches = (len(images_to_process) + batch_size - 1) // batch_size
+        
+        # When keep_alive=None or 0, process sequentially to allow model unload between requests
+        # Parallel processing prevents model unload because there's always another request using it
+        from evaluation.judging.base_llm_judge import OLLAMA_KEEP_ALIVE
+        if OLLAMA_KEEP_ALIVE is None or OLLAMA_KEEP_ALIVE == 0:
+            max_batch_workers = 1  # Sequential processing for keep_alive=None/0
+            logging.info("Using sequential processing (keep_alive=None/0) to allow model unload")
+        else:
+            max_batch_workers = min(4, num_batches)  # Parallel when model stays loaded
+            logging.debug(f"Using parallel processing with {max_batch_workers} workers (keep_alive={OLLAMA_KEEP_ALIVE})")
+        
+        batch_executor = ThreadPoolExecutor(max_workers=max_batch_workers)
         
         try:
             # Submit all batches immediately
@@ -314,11 +327,23 @@ class Phase3Runner:
                 end_idx = min(i + batch_size, len(images_to_process))
                 batch_paths = images_to_process[i:end_idx]
                 batch_labels = labels_to_process[i:end_idx]
+
+                # Stable IDs and context help downstream logging and analysis
+                batch_image_ids = [path.stem for path in batch_paths]
+                batch_context = {
+                    "occlusion_level": level,
+                    "fill_strategy": strategy,
+                    "gen_model": gen_model,
+                    "method": method,
+                }
                 
                 future = batch_executor.submit(
                     judge_model.predict_from_paths,
                     [str(path) for path in batch_paths],
                     batch_labels,
+                    image_ids=batch_image_ids,
+                    context=batch_context,
+                    return_details=True,
                     shared_executor=None  # Let predict_from_paths create its own executor to avoid deadlock
                 )
                 batch_futures.append((future, batch_paths, batch_labels, i // batch_size))
@@ -334,7 +359,8 @@ class Phase3Runner:
                 batch_paths, batch_labels, batch_idx = future_to_batch[future]
                 try:
                     # Add timeout to prevent infinite hang (5 minutes per batch should be enough)
-                    predictions = future.result(timeout=300)
+                    result = future.result(timeout=300)
+                    predictions = result[0] if isinstance(result, tuple) else result
                     batch_results[batch_idx] = (predictions, batch_paths, batch_labels)
                 except FutureTimeoutError:
                     logging.error(f"Timeout processing batch {batch_idx} (exceeded 5 minutes)")
@@ -387,54 +413,60 @@ class Phase3Runner:
         next_batch_labels = None
         next_future = None
         
-        for i in range(0, len(images_to_process), batch_size):
-            end_idx = min(i + batch_size, len(images_to_process))
-            batch_paths = images_to_process[i:end_idx]
-            batch_labels = labels_to_process[i:end_idx]
-            
-            # Use prefetched batch if available
-            if next_batch_images is not None:
-                batch_images = next_batch_images
-                batch_paths = next_batch_paths
-                batch_labels = next_batch_labels
-            else:
-                batch_images = self._load_images_batch(batch_paths)
-            
-            # Prefetch next batch
-            if i + batch_size < len(images_to_process):
-                next_end_idx = min(i + batch_size * 2, len(images_to_process))
-                next_batch_paths = images_to_process[i + batch_size:next_end_idx]
-                next_batch_labels = labels_to_process[i + batch_size:next_end_idx]
-                if self.load_workers > 1:
-                    executor = ThreadPoolExecutor(max_workers=1)
-                    next_future = executor.submit(self._load_images_batch, next_batch_paths)
+        # Create single prefetch executor for the entire level (reuse instead of creating per-batch)
+        prefetch_executor = ThreadPoolExecutor(max_workers=1) if self.load_workers > 1 else None
+        
+        try:
+            for i in range(0, len(images_to_process), batch_size):
+                end_idx = min(i + batch_size, len(images_to_process))
+                batch_paths = images_to_process[i:end_idx]
+                batch_labels = labels_to_process[i:end_idx]
+                
+                # Use prefetched batch if available
+                if next_batch_images is not None:
+                    batch_images = next_batch_images
+                    batch_paths = next_batch_paths
+                    batch_labels = next_batch_labels
+                else:
+                    batch_images = self._load_images_batch(batch_paths)
+                
+                # Prefetch next batch using shared executor
+                if i + batch_size < len(images_to_process):
+                    next_end_idx = min(i + batch_size * 2, len(images_to_process))
+                    next_batch_paths = images_to_process[i + batch_size:next_end_idx]
+                    next_batch_labels = labels_to_process[i + batch_size:next_end_idx]
+                    if prefetch_executor is not None:
+                        next_future = prefetch_executor.submit(self._load_images_batch, next_batch_paths)
+                    else:
+                        next_future = None
                 else:
                     next_future = None
-            else:
-                next_future = None
-            
-            # Evaluate batch
-            predictions = self._evaluate_batch(batch_images, judge_model, batch_labels)
-            
-            # Get prefetched batch if ready
-            if next_future is not None:
-                next_batch_images = next_future.result()
-                executor.shutdown(wait=False)
-            else:
-                next_batch_images = None
-            
-            # Memory cleanup
-            del batch_images
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            
-            # Record results
-            items_since_save, last_save_time, processed_count = self._record_batch_results(
-                predictions, batch_paths, batch_labels, level, gen_model, method,
-                results_by_level, saved_results, completed_items, result_file,
-                inner_pbar, processed_count, start_time, total_images_to_process,
-                items_since_save, last_save_time, save_interval_items, save_interval_seconds
-            )
+                
+                # Evaluate batch
+                predictions = self._evaluate_batch(batch_images, judge_model, batch_labels)
+                
+                # Get prefetched batch if ready
+                if next_future is not None:
+                    next_batch_images = next_future.result()
+                else:
+                    next_batch_images = None
+                
+                # Memory cleanup
+                del batch_images
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+                # Record results for this batch
+                items_since_save, last_save_time, processed_count = self._record_batch_results(
+                    predictions, batch_paths, batch_labels, level, gen_model, method,
+                    results_by_level, saved_results, completed_items, result_file,
+                    inner_pbar, processed_count, start_time, total_images_to_process,
+                    items_since_save, last_save_time, save_interval_items, save_interval_seconds
+                )
+        finally:
+            # Clean up prefetch executor
+            if prefetch_executor is not None:
+                prefetch_executor.shutdown(wait=True)
         
         return items_since_save, last_save_time, processed_count
     
@@ -474,7 +506,11 @@ class Phase3Runner:
             if pred < 0:
                 is_correct = 0
             
-            result_row = [img_id, level, is_correct]
+            result_row = [
+                img_id,
+                level,
+                is_correct
+            ]
             results_by_level[level].append(result_row)
             saved_results.add(result_key)
             items_since_save += 1
@@ -504,7 +540,7 @@ class Phase3Runner:
                 saved_results.clear()
         
         return items_since_save, last_save_time, processed_count
-    
+
     def _load_single_image(self, img_path: Path) -> torch.Tensor:
         """Load a single image and convert to tensor."""
         pil_image = Image.open(img_path).convert("RGB")
