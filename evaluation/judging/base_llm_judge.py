@@ -79,12 +79,14 @@ class BaseLLMJudge(JudgingModel):
         # Request counter for periodic reset (prevents KV cache degradation)
         self._request_count = 0
         
-        # Extract actual Ollama model name (remove -binary/-cosine suffix)
+        # Extract actual Ollama model name (remove -binary/-cosine/-classid suffix)
         # e.g., "llama3.2-vision-binary" -> "llama3.2-vision"
         if model_name.endswith('-binary'):
             self.ollama_model_name = model_name[:-7]  # Remove '-binary'
         elif model_name.endswith('-cosine'):
             self.ollama_model_name = model_name[:-7]  # Remove '-cosine'
+        elif model_name.endswith('-classid'):
+            self.ollama_model_name = model_name[:-8]  # Remove '-classid'
         else:
             self.ollama_model_name = model_name
         
@@ -302,18 +304,17 @@ class BaseLLMJudge(JudgingModel):
                     )
                     messages.append({'role': 'system', 'content': system_prompt})
                 
-                messages.append(
-                    {
-                        'role': 'system',
-                        'content': self.system_prompt
-                    },
-                    {
-                        'role': 'user',
-                        'content': prompt,
-                        'images': [image_data]
-                    }
-                )
-                
+                # Append system message
+                messages.append({
+                    'role': 'system',
+                    'content': self.system_prompt
+                })                
+                # Append user message with image
+                messages.append({
+                    'role': 'user',
+                    'content': prompt,
+                    'images': [image_data]
+                })
                 response = ollama.chat(
                     model=self.ollama_model_name,
                     messages=messages,
@@ -321,7 +322,7 @@ class BaseLLMJudge(JudgingModel):
                     keep_alive=OLLAMA_KEEP_ALIVE,  # Keep model in memory
                     format=format_schema  # Optional JSON schema for structured outputs
                 )
-                
+                logging.info(f"Sending response: {response}")
                 return response.message.content.strip()
                 
             except Exception as e:
