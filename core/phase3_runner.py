@@ -69,9 +69,9 @@ class Phase3Runner:
         
         with tqdm(total=total_combinations, desc="Phase 3 Progress") as pbar:
             for gen_model in self.config.GENERATING_MODELS:
-                for method in self.config.ATTRIBUTION_METHODS:
+                for judge_name in self.config.JUDGING_MODELS:
                     for strategy in self.config.FILL_STRATEGIES:
-                        for judge_name in self.config.JUDGING_MODELS:
+                        for method in self.config.ATTRIBUTION_METHODS:
                             if judge_name == gen_model:
                                 pbar.update(1)
                                 continue
@@ -665,6 +665,7 @@ def main():
     from models.loader import load_model
     from evaluation.judging.binary_llm_judge import BinaryLLMJudge
     from evaluation.judging.cosine_llm_judge import CosineSimilarityLLMJudge
+    from evaluation.judging.classid_llm_judge import ClassIdLLMJudge
     
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
@@ -678,6 +679,12 @@ def main():
                 model_cache[name] = BinaryLLMJudge(name, config.DATASET_NAME, 0.0)
             elif name.endswith('-cosine'):
                 model_cache[name] = CosineSimilarityLLMJudge(name, config.DATASET_NAME, 0.1, 0.8, "nomic-embed-text")
+            elif name.endswith('-classid'):
+                model_cache[name] = ClassIdLLMJudge(name, config.DATASET_NAME, 0.0)
+            elif name.endswith('.pth') or 'sipak' in name.lower():
+                # SIPaK models are .pth files in models/ directory
+                logging.info(f"Loading SIPaK model: {name}")
+                model_cache[name] = load_model(name)
             else:
                 model_cache[name] = load_model(name)
         return model_cache[name]

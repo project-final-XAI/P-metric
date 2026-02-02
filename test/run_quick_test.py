@@ -25,6 +25,7 @@ from core.phase3_runner import Phase3Runner
 from models.loader import load_model
 from evaluation.judging.registry import register_judging_model, get_judging_model
 from evaluation.judging.binary_llm_judge import BinaryLLMJudge
+from evaluation.judging.classid_llm_judge import ClassIdLLMJudge
 from data.loader import get_dataloader
 from attribution.registry import get_attribution_method
 from evaluation.occlusion import sort_pixels
@@ -269,6 +270,14 @@ def run_phase2_limited(config, gpu_manager, file_manager, model_cache, max_image
                 temperature=0.0
             )
             return model_cache[model_name]
+        elif model_name.endswith('-classid'):
+            logging.info(f"Loading ClassId LLM judge: {model_name}")
+            model_cache[model_name] = ClassIdLLMJudge(
+                model_name=model_name,
+                dataset_name=dataset_name,
+                temperature=0.0
+            )
+            return model_cache[model_name]
         
         # Load as PyTorch model
         logging.info(f"Loading PyTorch model: {model_name}")
@@ -338,7 +347,15 @@ Examples:
                 dataset_name=config.DATASET_NAME,
                 temperature=0.0
             )
+        # Create factory function for classid LLM judge
+        def classid_llm_factory(model_name: str):
+            return ClassIdLLMJudge(
+                model_name=model_name,
+                dataset_name=config.DATASET_NAME,
+                temperature=0.0
+            )
         register_judging_model("llama3.2-vision-binary", binary_llm_factory)
+        register_judging_model("llama3.2-vision-classid", classid_llm_factory)
         logging.info("LLM judges registered successfully")
     except Exception as e:
         logging.warning(f"Failed to register LLM judges: {e}")

@@ -33,7 +33,7 @@ class GPUManager:
         
         # Thermal monitoring state
         self._last_temp_check = 0.0
-        self._temp_check_interval = 40.0  # Check temperature every X seconds
+        self._temp_check_interval = 10.0  # Check temperature every X seconds
         self._last_temp = None
         self._throttle_factor = 1.2  # Multiplier for batch sizes (1.0 = no throttling)
     

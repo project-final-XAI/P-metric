@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from core.gpu_manager import GPUManager
 from core.file_manager import FileManager
-from core.gpu_utils import clear_cache_if_needed
+# from core.gpu_utils import clear_cache_if_needed
 from core.phase1_runner import Phase1Runner
 from data.loader import get_dataloader
 from evaluation.occlusion import apply_occlusion_batch
@@ -264,8 +264,8 @@ class Phase2Runner:
                     self._save_occluded_image(img, path)
         
         # Cleanup GPU memory periodically
-        if len(images_to_process) > 0:
-            clear_cache_if_needed(threshold_percent=50.0)
+        # if len(images_to_process) > 0:
+        #     clear_cache_if_needed(threshold_percent=50.0)
     
     def _save_occluded_image(self, image_tensor: torch.Tensor, path: Path):
         """
@@ -324,6 +324,7 @@ def main():
     from models.loader import load_model
     from evaluation.judging.binary_llm_judge import BinaryLLMJudge
     from evaluation.judging.cosine_llm_judge import CosineSimilarityLLMJudge
+    from evaluation.judging.classid_llm_judge import ClassIdLLMJudge
     
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
@@ -337,6 +338,8 @@ def main():
                 model_cache[name] = BinaryLLMJudge(name, config.DATASET_NAME, 0.0)
             elif name.endswith('-cosine'):
                 model_cache[name] = CosineSimilarityLLMJudge(name, config.DATASET_NAME, 0.1, 0.8, "nomic-embed-text")
+            elif name.endswith('-classid'):
+                model_cache[name] = ClassIdLLMJudge(name, config.DATASET_NAME, 0.0)
             else:
                 model_cache[name] = load_model(name)
         return model_cache[name]

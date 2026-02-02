@@ -87,30 +87,30 @@ DATASET_CONFIG = {
 }
 
 # Current dataset to use
-# DATASET_NAME = "imagenet"
-DATASET_NAME = "SIPaKMeD_cropped"
+DATASET_NAME = "imagenet"
+# DATASET_NAME = "SIPaKMeD_cropped"
 
 # -----------------
 # Model Configuration
 # -----------------
 # Models used for generating attribution heatmaps (Phase 1)
 GENERATING_MODELS = [
-    # "resnet50",
+    "resnet50",
     # "mobilenet_v2",
-    # "vgg16",
+    "vgg16",
 
     # "vit_b_16",
     # "swin_t",
 
-    "sipakmed_cropped_efficientnet.pth",
-    "sipakmed_cropped_ResNet50.pth",
+    # "sipakmed_cropped_efficientnet.pth",
+    # "sipakmed_cropped_ResNet50.pth",
 ]
 
 # Models used for evaluating occluded images (Phase 2)
 JUDGING_MODELS = [
-    # "resnet50",
+    "resnet50",
     # "mobilenet_v2",
-    # "vgg16",
+    "vgg16",
 
     # "vit_b_16",
     # "swin_t",
@@ -118,7 +118,7 @@ JUDGING_MODELS = [
     # "sipakmed_cropped_efficientnet.pth",
     # "sipakmed_cropped_ResNet50.pth",
 
-    "llama3.2-vision-binary",
+    # "llama3.2-vision-binary",
     # "llama3.2-vision-cosine",
     # "llama3.2-vision-classid",
 ]
@@ -138,8 +138,16 @@ ATTRIBUTION_METHODS = [
     "grad_cam",
     "guided_gradcam",
     "random_baseline",
-    # "c3f",
+    "c3f",
+    # DINOv2-based custom methods
+    "dinov2_pca_gaussian",
+    "dinov2_attention",
 ]
+
+# Global switches for DINOv2 register usage in custom methods
+# If True, the corresponding DINOv2 attribution method will use a register-enabled model.
+DINO_PCA_USE_REGISTERS = True
+DINO_ATTENTION_USE_REGISTERS = True
 
 # -----------------
 # Occlusion Configuration
