@@ -7,7 +7,7 @@ This is the main entry point for running the complete experiment.
 import logging
 import sys
 from pathlib import Path
-
+import torch
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -21,6 +21,7 @@ from core.phase4_runner import Phase4Runner
 from models.loader import load_model
 from evaluation.judging.binary_llm_judge import BinaryLLMJudge
 from evaluation.judging.cosine_llm_judge import CosineSimilarityLLMJudge
+from evaluation.judging.classid_llm_judge import ClassIdLLMJudge
 
 
 def get_cached_model(name, model_cache, dataset_name):
@@ -41,6 +42,13 @@ def get_cached_model(name, model_cache, dataset_name):
                 temperature=0.1,
                 similarity_threshold=0.8,
                 embedding_model="nomic-embed-text"
+            )
+        elif name.endswith('-classid'):
+            logging.info(f"Loading ClassId LLM judge: {name}")
+            model_cache[name] = ClassIdLLMJudge(
+                model_name=name,
+                dataset_name=dataset_name,
+                temperature=0.0
             )
         else:
             logging.info(f"Loading PyTorch model: {name}")
@@ -76,15 +84,27 @@ def main():
     
     phase1 = Phase1Runner(config, gpu_manager, file_manager, model_cache)
     phase1.run(get_cached_model_func)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        logging.info("Cleared GPU cache after Phase 1")
     
     phase2 = Phase2Runner(config, gpu_manager, file_manager, model_cache)
     phase2.run(get_cached_model_func)
-    
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        logging.info("Cleared GPU cache after Phase 2")
+
     phase3 = Phase3Runner(config, gpu_manager, file_manager, model_cache)
     phase3.run(get_cached_model_func)
-    
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        logging.info("Cleared GPU cache after Phase 3")
+
     phase4 = Phase4Runner(config, file_manager)
     phase4.run()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        logging.info("Cleared GPU cache after Phase 4")
     
     logging.info("=" * 60)
     logging.info("All phases complete!")
