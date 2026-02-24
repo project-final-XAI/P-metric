@@ -11,6 +11,7 @@ from attribution.cam_based import GradCAMMethod, GuidedGradCAMMethod
 from attribution.perturbation_based import OcclusionMethod, XRAIMethod
 from attribution.other import GuidedBackpropMethod, RandomBaselineMethod
 from attribution.c3f import C3FMethod
+from attribution.dinov2_methods import Dinov2PcaGaussianMethod, Dinov2AttentionMethod
 
 
 # Registry of all available methods
@@ -27,6 +28,9 @@ METHOD_REGISTRY = {
     "guided_gradcam": GuidedGradCAMMethod(),
     "random_baseline": RandomBaselineMethod(),
     "c3f": C3FMethod(),
+    # DINOv2-based custom methods
+    "dinov2_pca_gaussian": Dinov2PcaGaussianMethod(),
+    "dinov2_attention": Dinov2AttentionMethod(),
 }
 
 

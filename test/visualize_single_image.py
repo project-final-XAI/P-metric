@@ -42,7 +42,7 @@ DATASET_NAME = "imagenet" # "SIPaKMeD"
 FILL_STRATEGY = "black"  # Options: "gray", "blur", "black", "white", "random_noise", "mean"
 
 # Occlusion level to display (percentage)
-OCCLUSION_LEVEL = 50
+OCCLUSION_LEVEL = 20
 
 # True class label (set to None to auto-predict using model)
 TRUE_CLASS = None

@@ -49,7 +49,7 @@ HEATMAP_BATCH_SIZE = 12
 PHASE2_BATCH_SIZE = 128  # Batch size for Phase 2 occlusion processing (GPU)
 PHASE2_SAVE_WORKERS = 4  # Number of workers for parallel image saving (CPU)
 PHASE3_BATCH_SIZE_PYTORCH = 512  # Batch size for Phase 3 PyTorch model evaluation (GPU) - increased for better GPU utilization
-PHASE3_BATCH_SIZE_LLM = 32  # Batch size for Phase 3 LLM model evaluation (CPU/API) - smaller batches = continuous processing, no gaps
+PHASE3_BATCH_SIZE_LLM = 1  # Batch size for Phase 3 LLM model evaluation (CPU/API) - smaller batches = continuous processing, no gaps
 PHASE3_LOAD_WORKERS = 8  # Number of workers for parallel image loading in Phase 3
 
 # -----------------
@@ -81,25 +81,28 @@ DATASET_CONFIG = {
         "num_classes": 5
     },
     "SIPaKMeD_cropped": {
-        "path": DATA_DIR / "SIPaKMeD_cropped",
+        "path": DATA_DIR / "SIPaKMed_cropped",
         "num_classes": 5
     }
 }
 
 # Current dataset to use
 DATASET_NAME = "imagenet"
+# DATASET_NAME = "SIPaKMeD_cropped"
 
 # -----------------
 # Model Configuration
 # -----------------
 # Models used for generating attribution heatmaps (Phase 1)
 GENERATING_MODELS = [
-    # "resnet50",
-    "mobilenet_v2",
-    # "vgg16",
+    "resnet50",
+    # "mobilenet_v2",
+    "vgg16",
+
     # "vit_b_16",
     # "swin_t",
-    # "sipakmed_resnet50.pth",
+
+    # "sipakmed_cropped_efficientnet.pth",
     # "sipakmed_cropped_ResNet50.pth",
 ]
 
@@ -107,15 +110,17 @@ GENERATING_MODELS = [
 JUDGING_MODELS = [
     "resnet50",
     # "mobilenet_v2",
+    "vgg16",
 
     # "vit_b_16",
     # "swin_t",
 
-    # "sipakmed_efficientnetB0.pth"
     # "sipakmed_cropped_efficientnet.pth",
+    # "sipakmed_cropped_ResNet50.pth",
 
     # "llama3.2-vision-binary",
     # "llama3.2-vision-cosine",
+    # "llama3.2-vision-classid",
 ]
 
 # -----------------
@@ -134,22 +139,31 @@ ATTRIBUTION_METHODS = [
     "guided_gradcam",
     "random_baseline",
     "c3f",
+    # DINOv2-based custom methods
+    "dinov2_pca_gaussian",
+    "dinov2_attention",
 ]
+
+# Global switches for DINOv2 register usage in custom methods
+# If True, the corresponding DINOv2 attribution method will use a register-enabled model.
+DINO_PCA_USE_REGISTERS = True
+DINO_ATTENTION_USE_REGISTERS = True
 
 # -----------------
 # Occlusion Configuration
 # -----------------
 # Occlusion levels (percentages) to evaluate
-OCCLUSION_LEVELS = list(range(0, 100, 5))
+OCCLUSION_LEVELS = list[int](range(0, 100, 5))# + [90, 95,98,100]
+# OCCLUSION_LEVELS =  [20, 40, 60, 80, 95,100]
 
 # Fill strategies for occluded pixels
 FILL_STRATEGIES = [
-    # "gray",
-    # "blur",
-    # "random_noise",
-    # "black",
+    "gray",
+    "blur",
+    "random_noise",
+    "black",
     "mean",
-    # "white",
+    "white",
 ]
 
 # -----------------

@@ -14,9 +14,10 @@ from PIL import Image
 from tqdm import tqdm
 from typing import Dict, Any
 
+from core import gpu_manager
 from core.gpu_manager import GPUManager
 from core.file_manager import FileManager
-from core.gpu_utils import clear_cache_if_needed, prepare_batch_tensor
+from core.gpu_utils import prepare_batch_tensor
 from attribution.registry import get_attribution_method
 from data.loader import get_dataloader
 from evaluation.occlusion import sort_pixels
@@ -108,8 +109,9 @@ class Phase1Runner:
             with tqdm(total=total_combinations, desc="Phase 1 Progress") as pbar:
                 for model_idx, model_name in enumerate(self.config.GENERATING_MODELS, 1):
                     model = get_cached_model_func(model_name)
-                    
+
                     for method_idx, method_name in enumerate(self.config.ATTRIBUTION_METHODS, 1):
+                        self.gpu_manager.check_and_throttle()
                         pbar.set_description(
                             f"[{model_idx}/{len(self.config.GENERATING_MODELS)}] {model_name[:12]} | "
                             f"[{method_idx}/{len(self.config.ATTRIBUTION_METHODS)}] {method_name[:15]}"
@@ -251,8 +253,7 @@ class Phase1Runner:
         
         # Cleanup: check temperature and clear cache if needed
         self.gpu_manager.check_and_throttle()
-        clear_cache_if_needed(threshold_percent=50.0)
-    
+
     def _save_heatmap_png(self, heatmap: np.ndarray, path: Path):
         """
         Save heatmap as PNG image with colormap.
@@ -301,6 +302,7 @@ def main():
     from models.loader import load_model
     from evaluation.judging.binary_llm_judge import BinaryLLMJudge
     from evaluation.judging.cosine_llm_judge import CosineSimilarityLLMJudge
+    from evaluation.judging.classid_llm_judge import ClassIdLLMJudge
     
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
@@ -314,6 +316,8 @@ def main():
                 model_cache[name] = BinaryLLMJudge(name, config.DATASET_NAME, 0.0)
             elif name.endswith('-cosine'):
                 model_cache[name] = CosineSimilarityLLMJudge(name, config.DATASET_NAME, 0.1, 0.8, "nomic-embed-text")
+            elif name.endswith('-classid'):
+                model_cache[name] = ClassIdLLMJudge(name, config.DATASET_NAME, 0.0)
             else:
                 model_cache[name] = load_model(name)
         return model_cache[name]
