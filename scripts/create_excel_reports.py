@@ -28,9 +28,9 @@ def create_excel_with_chart(
     """
     # Create pivot table: method as rows, occlusion_level as columns
     pivot_df = df.pivot_table(
-        index='method',
+        index='attribution_method',
         columns='occlusion_level',
-        values='mean_acc',
+        values='mean_accuracy',
         aggfunc='mean'
     )
     
@@ -39,7 +39,7 @@ def create_excel_with_chart(
     
     # Sort occlusion levels (columns)
     # Filter out 'method' column, convert rest to float for sorting, then sort
-    occlusion_cols = [c for c in pivot_df.columns if c != 'method']
+    occlusion_cols = [c for c in pivot_df.columns if c != 'attribution_method']
     # Sort columns based on their numeric value (handles string '0.1' vs float 0.1)
     try:
         occlusion_cols.sort(key=lambda x: float(x))
@@ -47,7 +47,7 @@ def create_excel_with_chart(
         occlusion_cols.sort() # Fallback to string sort
         
     # Reorder DataFrame: Method column first, then sorted occlusion levels
-    pivot_df = pivot_df[['method'] + occlusion_cols]
+    pivot_df = pivot_df[['attribution_method'] + occlusion_cols]
     
     num_rows = len(pivot_df) + 1  # +1 for header
     num_cols = len(pivot_df.columns)
@@ -154,7 +154,7 @@ def main():
         df['occlusion_level'] = pd.to_numeric(df['occlusion_level'], errors='coerce')
     
     # Ensure we have the required columns
-    required_cols = ['generator', 'method', 'judge', 'fill', 'occlusion_level', 'mean_acc']
+    required_cols = ['generating_model', 'attribution_method', 'judging_model', 'fill_strategy', 'occlusion_level', 'mean_accuracy']
     missing_cols = [col for col in required_cols if col not in df.columns]
     
     if missing_cols:
@@ -163,7 +163,7 @@ def main():
         return
     
     # Group by (generator, judge, fill)
-    group_cols = ['generator', 'judge', 'fill']
+    group_cols = ['generating_model', 'judging_model', 'fill_strategy']
     
     # Filter out any rows with NaN in grouping columns
     df = df.dropna(subset=group_cols)
