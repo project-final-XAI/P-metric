@@ -129,7 +129,7 @@ JUDGING_MODELS = [
 ATTRIBUTION_METHODS = [
     "saliency",
     "inputxgradient",
-    "smoothgrad",
+    # "smoothgrad", # TODO: this method on vgg crash the pc. check why
     "guided_backprop",
     "integrated_gradients",
     "occlusion",

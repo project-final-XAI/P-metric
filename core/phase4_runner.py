@@ -10,6 +10,7 @@ import pandas as pd
 from core.file_manager import FileManager
 from evaluation.metrics import calculate_auc, calculate_drop
 from visualization.plotter import plot_accuracy_degradation_curves, plot_fill_strategy_comparison
+from scripts import create_excel_reports
 
 
 class Phase4Runner:
@@ -56,6 +57,12 @@ class Phase4Runner:
             
             self._save_results(agg_df, metrics_df)
             self._generate_plots(agg_df, datasets)
+
+            # Generate detailed Excel reports (pivot tables + charts)
+            try:
+                create_excel_reports.main()
+            except Exception as e:
+                logging.warning(f"Failed to generate Excel reports: {e}")
             
             logging.info(f"Phase 4 complete! Results → {self.file_manager.analysis_dir}")
         except Exception as e:
