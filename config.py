@@ -87,36 +87,36 @@ DATASET_CONFIG = {
 }
 
 # Current dataset to use
-DATASET_NAME = "imagenet"
-# DATASET_NAME = "SIPaKMeD_cropped"
+# DATASET_NAME = "imagenet"
+DATASET_NAME = "SIPaKMeD_cropped"
 
 # -----------------
 # Model Configuration
 # -----------------
 # Models used for generating attribution heatmaps (Phase 1)
 GENERATING_MODELS = [
-    "resnet50",
+    # "resnet50",
     # "mobilenet_v2",
-    "vgg16",
+    # "vgg16",
 
     # "vit_b_16",
     # "swin_t",
 
-    # "sipakmed_cropped_efficientnet.pth",
-    # "sipakmed_cropped_ResNet50.pth",
+    "sipakmed_cropped_efficientnet.pth",
+    "sipakmed_cropped_ResNet50.pth",
 ]
 
 # Models used for evaluating occluded images (Phase 2)
 JUDGING_MODELS = [
-    "resnet50",
+    # "resnet50",
     # "mobilenet_v2",
-    "vgg16",
+    # "vgg16",
 
     # "vit_b_16",
     # "swin_t",
 
-    # "sipakmed_cropped_efficientnet.pth",
-    # "sipakmed_cropped_ResNet50.pth",
+    "sipakmed_cropped_efficientnet.pth",
+    "sipakmed_cropped_ResNet50.pth",
 
     # "llama3.2-vision-binary",
     # "llama3.2-vision-cosine",
@@ -153,7 +153,7 @@ DINO_ATTENTION_USE_REGISTERS = True
 # Occlusion Configuration
 # -----------------
 # Occlusion levels (percentages) to evaluate
-OCCLUSION_LEVELS = list[int](range(0, 100, 5))# + [90, 95,98,100]
+OCCLUSION_LEVELS = list[int](range(0, 105, 5))
 # OCCLUSION_LEVELS =  [20, 40, 60, 80, 95,100]
 
 # Fill strategies for occluded pixels
