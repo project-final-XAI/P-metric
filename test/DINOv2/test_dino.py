@@ -1,79 +1,157 @@
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from PIL import Image
-from torchvision import transforms
+"""
+test_dino.py — Compare DINOv2 attribution methods side-by-side.
+
+Shows 5 columns per image:
+  Original | PCA-Gaussian | CLS-Attention | Fused (new) | Fused overlay
+"""
+
 import os
 import random
-from gussian import Dinov2BinarySegmentMethod
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from PIL import Image
+from torchvision import transforms
+
+# ── new combined method ──────────────────────────────────────────────────────
+from gussian import Dinov2UnifiedMethod
+
+# ── original individual methods ──────────────────────────────────────────────
+# Adjust the import paths if your project layout differs.
+try:
+    from attribution.dinov2_methods import Dinov2PcaGaussianMethod, Dinov2AttentionMethod
+    _HAVE_OLD_METHODS = True
+except ImportError:
+    print(
+        "[test_dino] Could not import old methods "
+        "(attribution.method_dinov2 not found). "
+        "Only the fused method will be shown."
+    )
+    _HAVE_OLD_METHODS = False
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def load_random_imagenet_img(base_path: str):
-    """Selects and loads a random image from ImageNet style directory structure."""
-    # 1. Get list of all subdirectories (synsets)
-    subdirs = [d for d in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, d))]
+    """Select and load a random image from an ImageNet-style directory tree."""
+    subdirs = [
+        d for d in os.listdir(base_path)
+        if os.path.isdir(os.path.join(base_path, d))
+    ]
     if not subdirs:
         raise FileNotFoundError(f"No subdirectories found in {base_path}")
-    
-    # 2. Pick a random subdirectory
+
     random_dir = random.choice(subdirs)
-    dir_path = os.path.join(base_path, random_dir)
-    
-    # 3. Pick a random image from that directory
-    images = [f for f in os.listdir(dir_path) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    dir_path   = os.path.join(base_path, random_dir)
+    images     = [
+        f for f in os.listdir(dir_path)
+        if f.lower().endswith((".png", ".jpg", ".jpeg"))
+    ]
     if not images:
-        # If directory is empty, try again recursively or skip (simplified here)
-        return load_random_imagenet_img(base_path)
-        
+        return load_random_imagenet_img(base_path)   # try another dir
+
     random_img_name = random.choice(images)
-    full_path = os.path.join(dir_path, random_img_name)
-    
-    print(f"Selected Image: {full_path}")
-    return Image.open(full_path).convert("RGB")
+    full_path       = os.path.join(dir_path, random_img_name)
+    return Image.open(full_path).convert("RGB"), random_img_name
 
-def generate_heatmap_local(base_path: str):
-    # Load local random image instead of URL
-    try:
-        img_pil = load_random_imagenet_img(base_path)
-    except Exception as e:
-        print(f"Error loading image: {e}")
-        return
 
-    # Preprocessing
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
-    ])
-    img_tensor = transform(img_pil).unsqueeze(0)
+_transform = transforms.Compose([
+    transforms.Resize((518, 518)),
+    transforms.ToTensor(),
+    transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+])
 
-    # Initialize Method
-    pca_tool = Dinov2BinarySegmentMethod()
 
-    # Compute
-    print("Generating PCA heatmap...")
-    # Get heatmap and ensure it's a numpy array on CPU
-    pca_heatmap = pca_tool.compute(None, img_tensor, None)[0].cpu().numpy()
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
-    # --- Overlay Logic ---
-    img_np = np.array(img_pil) / 255.0
-    fig, ax = plt.subplots(1, 3, figsize=(18, 6))
+def generate_comparison(base_path: str, n_images: int = 2) -> None:
+    """
+    Loads ``n_images`` random images and produces a comparison figure showing
+    all available methods side-by-side.
+    """
+    # Instantiate methods once (models are cached internally)
+    fused_method = Dinov2UnifiedMethod()
+    if _HAVE_OLD_METHODS:
+        pca_method  = Dinov2PcaGaussianMethod()
+        attn_method = Dinov2AttentionMethod()
 
-    ax[0].imshow(img_pil)
-    ax[0].set_title("Original Image")
-    ax[0].axis("off")
+    for idx in range(n_images):
+        print(f"\n── Image {idx + 1}/{n_images} ──────────────────────────────────")
+        try:
+            img_pil, img_name = load_random_imagenet_img(base_path)
+        except Exception as e:
+            print(f"Error loading image: {e}")
+            continue
 
-    ax[1].imshow(pca_heatmap, cmap='jet')
-    ax[1].set_title("DINOv2 PCA Heatmap")
-    ax[1].axis("off")
+        img_tensor = _transform(img_pil).unsqueeze(0)   # (1, 3, 518, 518)
 
-    ax[2].imshow(img_np)
-    ax[2].imshow(pca_heatmap, cmap='jet', alpha=0.5)
-    ax[2].set_title("Overlap (Blend)")
-    ax[2].axis("off")
+        # ── compute heatmaps ─────────────────────────────────────────────────
+        print(f"[fused]   computing for: {img_name}")
+        fused_heatmap = fused_method.compute(None, img_tensor, None)[0].cpu().numpy()
 
-    plt.tight_layout()
-    plt.show()
+        pca_heatmap = attn_heatmap = None
+        if _HAVE_OLD_METHODS:
+            print(f"[pca]     computing for: {img_name}")
+            pca_heatmap  = pca_method.compute(None, img_tensor, None)[0].cpu().numpy()
+            print(f"[attn]    computing for: {img_name}")
+            attn_heatmap = attn_method.compute(None, img_tensor, None)[0].cpu().numpy()
+
+        # ── resize original to match heatmap spatial dims ───────────────────
+        H, W    = fused_heatmap.shape
+        img_np  = np.array(img_pil.resize((W, H))) / 255.0
+
+        # ── build figure ─────────────────────────────────────────────────────
+        if _HAVE_OLD_METHODS:
+            ncols = 5
+            titles = [
+                f"Original\n{img_name}",
+                "PCA-Gaussian\n(old)",
+                "CLS-Attention\n(old)",
+                "Fused\n(new)",
+                "Fused Overlay\n(new)",
+            ]
+            maps = [None, pca_heatmap, attn_heatmap, fused_heatmap, fused_heatmap]
+        else:
+            ncols = 4
+            titles = [
+                f"Original\n{img_name}",
+                "Fused heatmap",
+                "Fused (jet)",
+                "Fused Overlay",
+            ]
+            maps = [None, fused_heatmap, fused_heatmap, fused_heatmap]
+
+        fig, axes = plt.subplots(1, ncols, figsize=(5 * ncols, 5))
+        fig.suptitle(f"DINOv2 Attribution Comparison — {img_name}", fontsize=13)
+
+        for col, (ax, title, hmap) in enumerate(zip(axes, titles, maps)):
+            ax.set_title(title, fontsize=9)
+            ax.axis("off")
+
+            if hmap is None:
+                # Original image
+                ax.imshow(img_np)
+            elif col == ncols - 1:
+                # Overlay column
+                ax.imshow(img_np)
+                im = ax.imshow(hmap, cmap="jet", alpha=0.5)
+                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            else:
+                # Pure heatmap column
+                im = ax.imshow(hmap, cmap="jet")
+                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+        plt.tight_layout()
+        plt.show()
+
+
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Path relative to your test_dino.py file
-    imagenet_path = "../../data/imagenet" 
-    generate_heatmap_local(imagenet_path)
+    imagenet_path = "../../data/imagenet"   # adjust if needed
+    generate_comparison(imagenet_path, n_images=2)

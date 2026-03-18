@@ -138,7 +138,7 @@ ATTRIBUTION_METHODS = [
     "grad_cam",
     "guided_gradcam",
     "random_baseline",
-    "c3f",
+    # "c3f", #the profesor said we dont care anymore
     # DINOv2-based custom methods
     "dinov2_pca_gaussian",
     "dinov2_attention",
