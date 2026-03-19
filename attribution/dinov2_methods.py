@@ -726,3 +726,90 @@ class Dinov2ComboEntropyMethod(Dinov2AllMethodsBase):
 
     def _scores_from_fwd(self, fwd: dict, pc_base: np.ndarray) -> np.ndarray:
         return _scores_combo_entropy(_scores_attn(fwd), pc_base)
+
+# ---------------------------------------------------------------------------
+# Method 7 — COMBO_ENT_SMOOTH
+# ---------------------------------------------------------------------------
+
+class Dinov2ComboEntSmoothMethod(Dinov2AllMethodsBase):
+    """Attribution via entropy-weighted attn + PC1, with Gaussian smoothing
+    and a PC1 gate to reduce spatial fragmentation.
+
+    Extends COMBO_ENT (Method 6) with two post-processing steps:
+
+    1. Gaussian smoothing (sigma in patch units) — reduces speckle from
+       spatially non-continuous attention activations before gating, so the
+       gate boundary is not itself noisy.  The map is re-normalized to [0,1]
+       after smoothing so that gamma's effect is image-independent.
+
+    2. PC1 gate — multiplies the smoothed map by (pc1_map ** gamma), where
+       pc1_map is the shared soft PCA base in [0,1].  This is a soft mask
+       that suppresses patches with low object-likeness according to PCA.
+       gamma > 1 sharpens the object boundary more aggressively.
+
+    3. Alpha blend — blends the gated and ungated smoothed maps:
+           hm = alpha * gated + (1 - alpha) * smoothed
+       Prevents over-suppression of fine details (thin limbs, textured parts)
+       where PC1 underestimates the object extent.
+
+    Hyperparameters (configurable via constructor):
+        sigma  (float, default 1.0) — Gaussian std-dev in patch units.
+                                      Set to 0 to disable smoothing.
+        gamma  (float, default 1.0) — PC1 gate exponent (1 = linear).
+        alpha  (float, default 0.7) — blend weight for the gated map
+                                      (1.0 = fully gated, 0.0 = no gate).
+    """
+
+    def __init__(self, sigma: float = 1.0, gamma: float = 1.0, alpha: float = 0.7) -> None:
+        super().__init__("dinov2_combo_ent_smooth")
+        self.sigma = sigma
+        self.gamma = gamma
+        self.alpha = alpha
+
+    def _scores_from_fwd(self, fwd: dict, pc_base: np.ndarray) -> np.ndarray:
+        import math
+
+        attn = _scores_attn(fwd)   # (N,) float32, [0,1]
+        pc1  = pc_base             # (N,) float32, [0,1]
+
+        grid_h = fwd["grid_h"]
+        grid_w = fwd["grid_w"]
+
+        # --- Step 1: entropy-weighted blend (same as COMBO_ENT) ----------
+        base = _scores_combo_entropy(attn, pc1)   # (N,) float32, [0,1]
+
+        # --- Step 2: Gaussian smoothing on patch grid --------------------
+        hm = torch.from_numpy(base).float().reshape(1, 1, grid_h, grid_w).to(DEVICE)
+
+        if self.sigma > 0:
+            half   = math.ceil(3.0 * self.sigma)
+            ksize  = 2 * half + 1
+            coords = torch.arange(ksize, dtype=torch.float32, device=DEVICE) - half
+            g      = torch.exp(-(coords ** 2) / (2.0 * self.sigma ** 2))
+            g      = g / g.sum()
+            kernel = torch.outer(g, g)
+            kernel = (kernel / kernel.sum()).view(1, 1, ksize, ksize)
+            hm = F.conv2d(hm, kernel, padding=half)
+
+        # Re-normalize after smoothing so gamma's effect is image-independent
+        lo, hi = hm.min(), hm.max()
+        hm = (hm - lo) / (hi - lo + 1e-8) if (hi - lo).abs() > 1e-8 \
+             else torch.zeros_like(hm)
+
+        # --- Step 3: PC1 gate --------------------------------------------
+        pc1_map = torch.from_numpy(pc1).float().reshape(1, 1, grid_h, grid_w).to(DEVICE)
+        gated   = hm * (pc1_map ** self.gamma)
+
+        # --- Step 4: alpha blend gated vs smoothed -----------------------
+        hm = self.alpha * gated + (1.0 - self.alpha) * hm
+
+        # Flatten back to (N,) for the standard _to_output_tensor pipeline
+        scores = hm.reshape(-1).cpu().numpy().astype(np.float32)
+
+        lo, hi = scores.min(), scores.max()
+        if hi - lo > 1e-8:
+            scores = (scores - lo) / (hi - lo)
+        else:
+            scores = np.zeros_like(scores)
+
+        return scores

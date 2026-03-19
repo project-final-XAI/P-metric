@@ -36,6 +36,7 @@ METHOD_REGISTRY = {
     "dinov2_PC_L2": Dinov2PcL2Method(),
     "dinov2_COMBO_FIXED": Dinov2ComboFixedMethod(),
     "dinov2_ENT": Dinov2ComboEntropyMethod(),
+    "dinov2_COMBO_ENT_SMOOTH": Dinov2ComboEntSmoothMethod(),
 }
 
 

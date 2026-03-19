@@ -148,6 +148,7 @@ ATTRIBUTION_METHODS = [
     "dinov2_PC_L2",
     "dinov2_COMBO_FIXED",
     "dinov2_ENT",
+    "dinov2_COMBO_ENT_SMOOTH",
 ]
 
 # Global switches for DINOv2 register usage in custom methods
