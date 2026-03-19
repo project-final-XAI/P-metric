@@ -81,13 +81,13 @@ def main():
     logging.info("=" * 60)
     logging.info("Starting 4-Phase Pipeline")
     logging.info("=" * 60)
-    
+
     phase1 = Phase1Runner(config, gpu_manager, file_manager, model_cache)
     phase1.run(get_cached_model_func)
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         logging.info("Cleared GPU cache after Phase 1")
-    
+
     phase2 = Phase2Runner(config, gpu_manager, file_manager, model_cache)
     phase2.run(get_cached_model_func)
     if torch.cuda.is_available():
