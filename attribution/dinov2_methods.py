@@ -1,82 +1,144 @@
 """
-DINOv2-based attribution methods.
+DINOv2-based attribution methods — unified 6-method suite.
 
-Provides two attribution methods that integrate the DINOv2 heatmaps into the
-standard Phase 1/2 pipeline:
+Architecture
+------------
+All six methods share a single forward pass through DINOv2.  The shared
+base is the **soft PCA map**: the best-scoring principal component (among
+the first ``DINO_PCA_N_COMPONENTS``, default 3) selected by center-vs-border
+contrast scoring, normalized to [0, 1] with NO binarization and NO Gaussian
+blur.  This raw continuous map is then used as the PC1 signal by every
+method that needs it, avoiding redundant model calls.
 
-- Dinov2PcaGaussianMethod: PCA + (non-Gaussian) soft heatmap (legacy name)
-- Dinov2AttentionMethod:   Self-attention heatmap  (from method_attention.py)
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Step 0  One DINOv2 forward pass → patch_tokens [N,D], cls [D],     │
+    │          attention [heads, N]                                        │
+    │ Step 1  PCA(n_components) → select best component by center-border  │
+    │          scoring → soft [0,1] map  (shared base for all methods)    │
+    │                                                                      │
+    │  Method              PC base?  Attn?  Extra blend logic             │
+    │  ──────────────────  ────────  ─────  ─────────────────────────     │
+    │  1. DINO_ATTN        –         ✓      head-averaged CLS attention    │
+    │  2. DINO_PC1         ✓         –      soft PC1 only                  │
+    │  3. DINO_PC_EV       ✓         –      PC1+PC2+PC3 × explained var    │
+    │  4. DINO_PC_L2       ✓         –      L2 norm of PC1+PC2+PC3         │
+    │  5. COMBO_FIXED      ✓         ✓      0.5 × attn + 0.5 × PC1         │
+    │  6. COMBO_ENT        ✓         ✓      entropy-adaptive attn + PC1    │
+    └─────────────────────────────────────────────────────────────────────┘
 
-Both methods decide whether to use DINOv2 register models based on config flags:
-- config.DINO_PCA_USE_REGISTERS       (bool, default True)
-- config.DINO_ATTENTION_USE_REGISTERS (bool, default True)
+Polarity correction
+-------------------
+For all PCA-based methods, the sign of each component is determined by
+Pearson correlation with per-patch cosine similarity to the CLS token.
+The CLS token is DINOv2's global image summary; patches most similar to it
+are empirically the foreground regions.  A negative correlation means the
+component is pointing "away" from foreground — it is flipped.  This works
+for any foreground-to-background area ratio (close-ups, medical images, etc.)
+and replaces the old center-vs-border polarity heuristic used for sign only
+(center-vs-border is still used for *component selection*, not sign).
 
-Additional PCA tuning knobs (all optional in config):
-- config.DINO_PCA_N_COMPONENTS  (int,   default 5)    – how many PCA components to evaluate
-- config.DINO_PCA_THRESHOLD_Q   (float, default 0.5)  – quantile for binary foreground mask
-- config.DINO_PCA_BORDER        (int,   default 1)    – border width (patches) for scoring
-- config.DINO_PCA_CENTER_FRAC   (float, default 0.4)  – center fraction for scoring
+Why no binarization?
+--------------------
+The normalized PCA component values already form a continuous [0, 1]
+importance map.  Applying a hard quantile threshold would collapse the
+natural gradations between "strongly foreground" and "weakly foreground"
+patches.  The soft map is passed directly into each method's blending logic.
 
-Additional Attention tuning knobs:
-- (Gaussian smoothing is intentionally disabled in this codebase.)
+Configuration flags (all optional, read from ``config`` module)
+---------------------------------------------------------------
+  DINO_PCA_USE_REGISTERS   bool   True   – use dinov2_vits14_reg
+  DINO_PCA_N_COMPONENTS    int    3      – components to evaluate for selection
+  DINO_PCA_BORDER          int    1      – border ring width for scoring
+  DINO_PCA_CENTER_FRAC     float  0.4    – center fraction for scoring
+  DEVICE                   str           – torch device (auto-detected if absent)
 """
 
 from __future__ import annotations
 
 from typing import Optional
 
-import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
 from sklearn.decomposition import PCA
 from torchvision import transforms
-from transformers import AutoImageProcessor, Dinov2Model
 
 import config
 from attribution.base import AttributionMethod
 
 
 # ---------------------------------------------------------------------------
-# Device — pulled from config if available, otherwise auto-detect
+# Constants
 # ---------------------------------------------------------------------------
+
 DEVICE = torch.device(
     config.DEVICE
     if hasattr(config, "DEVICE")
     else ("cuda" if torch.cuda.is_available() else "cpu")
 )
 
-# DINOv2 patch size is always 14 for all public checkpoints
 _PATCH_SIZE = 14
-
-# Fixed input size for the attention branch (must be divisible by 14)
-_ATTN_IMAGE_SIZE = (518, 518)
-
-# ImageNet normalization used by all DINOv2 variants
+_ATTN_IMAGE_SIZE = (518, 518)   # 518 = 14 × 37 — optimal for DINOv2 patch grid
 _IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _IMAGENET_STD  = (0.229, 0.224, 0.225)
 
+# One cache per model variant so both can coexist in the same process
+_MODEL_CACHE: dict[str, object] = {}   # "std" | "reg" → torch.hub model
+
 
 # ---------------------------------------------------------------------------
-# Shared internal helpers
+# Model loading
 # ---------------------------------------------------------------------------
 
-def _normalize(arr: np.ndarray) -> np.ndarray:
-    """Min-max normalize a numpy array to [0, 1]."""
-    mn, mx = arr.min(), arr.max()
-    return (arr - mn) / (mx - mn + 1e-8)
+def _ensure_model(use_registers: bool):
+    """Load and cache the torch.hub DINOv2 model (called once on first use).
+
+    Uses the torch.hub API (facebookresearch/dinov2) which exposes both
+    ``forward_features`` and ``get_last_selfattention`` — required by all
+    six methods.
+
+    Args:
+        use_registers: If True load ``dinov2_vits14_reg`` (4 register tokens),
+                       otherwise ``dinov2_vits14``.
+
+    Returns:
+        The cached, eval-mode DINOv2 model on DEVICE.
+    """
+    key = "reg" if use_registers else "std"
+    if key not in _MODEL_CACHE:
+        name = "dinov2_vits14_reg" if use_registers else "dinov2_vits14"
+        print(f"[Dinov2Methods] Loading {name} on {DEVICE} …")
+        m = torch.hub.load("facebookresearch/dinov2", name, verbose=False)
+        m.to(DEVICE).eval()
+        _MODEL_CACHE[key] = m
+    return _MODEL_CACHE[key]
 
 
-def _tensor_batch_to_pil(images: torch.Tensor) -> list[Image.Image]:
+# ---------------------------------------------------------------------------
+# Image pre-processing
+# ---------------------------------------------------------------------------
+
+_transform = transforms.Compose([
+    transforms.Resize(_ATTN_IMAGE_SIZE),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
+])
+
+
+def _tensor_to_pil(images: torch.Tensor) -> list[Image.Image]:
+    """Un-normalize an ImageNet-normalized float32 batch tensor to PIL images.
+
+    Args:
+        images: (B, C, H, W) float32 tensor, ImageNet-normalized.
+
+    Returns:
+        List of B RGB PIL Images.
     """
-    Convert a (B, C, H, W) float tensor (ImageNet-normalized) back to PIL images.
-    Used so the HuggingFace processor can re-encode them cleanly.
-    """
-    mean = torch.tensor(_IMAGENET_MEAN, device=images.device).view(1, 3, 1, 1)
-    std  = torch.tensor(_IMAGENET_STD,  device=images.device).view(1, 3, 1, 1)
-    imgs_rgb = (images * std + mean).clamp(0, 1)          # un-normalize
-    imgs_uint8 = (imgs_rgb * 255).byte().cpu()            # → uint8
+    mean       = torch.tensor(_IMAGENET_MEAN, device=images.device).view(1, 3, 1, 1)
+    std        = torch.tensor(_IMAGENET_STD,  device=images.device).view(1, 3, 1, 1)
+    imgs_rgb   = (images * std + mean).clamp(0, 1)
+    imgs_uint8 = (imgs_rgb * 255).byte().cpu()
     return [
         Image.fromarray(imgs_uint8[i].permute(1, 2, 0).numpy())
         for i in range(imgs_uint8.shape[0])
@@ -84,524 +146,864 @@ def _tensor_batch_to_pil(images: torch.Tensor) -> list[Image.Image]:
 
 
 # ---------------------------------------------------------------------------
-# Shared model caches  (one per method family to avoid cross-contamination)
+# Shared forward pass — extracts everything needed by all 6 methods at once
 # ---------------------------------------------------------------------------
-_PCA_MODEL_CACHE:  dict[str, tuple] = {}   # key: "std" | "reg"  → (processor, model)
-_ATTN_MODEL_CACHE: dict[str, object] = {}  # key: "std" | "reg"  → torch.hub model
+
+# ---------------------------------------------------------------------------
+# Shared forward pass — extracts everything needed by all 6 methods at once
+# ---------------------------------------------------------------------------
+
+def _forward_once(model, img_pil: Image.Image) -> dict:
+    """Run one DINOv2 forward pass and return all signals needed by all methods.
+
+    Uses a forward hook on the last block's QKV projection to extract the
+    self-attention matrix, bypassing the lack of `get_last_selfattention` in DINOv2.
+    """
+    img_t = _transform(img_pil).unsqueeze(0).to(DEVICE)  # (1, C, 518, 518)
+    grid_h = img_t.shape[2] // _PATCH_SIZE
+    grid_w = img_t.shape[3] // _PATCH_SIZE
+    N = grid_h * grid_w
+
+    # 1. Register a hook to intercept the QKV output of the very last block
+    saved_qkv = []
+
+    def qkv_hook(module, input, output):
+        saved_qkv.append(output.detach())
+
+    last_block = model.blocks[-1]
+    handle = last_block.attn.qkv.register_forward_hook(qkv_hook)
+
+    with torch.no_grad():
+        # --- patch tokens + CLS -------------------------------------------
+        out = model.forward_features(img_t)
+
+    # Remove the hook immediately after the forward pass so it doesn't linger
+    handle.remove()
+
+    # 2. Parse the token outputs
+    if isinstance(out, dict) and "x_norm_patchtokens" in out:
+        patch_tokens = out["x_norm_patchtokens"][0].float()  # (N, D)
+        cls_token = out["x_norm_clstoken"][0].float().squeeze(0)  # (D,)
+    else:
+        # Fallback: raw tensor [1, T, D] — skip non-patch prefix tokens
+        all_tok = (out[0] if torch.is_tensor(out) else out["x_prenorm"][0]).float()
+        n_prefix = all_tok.shape[0] - N
+        patch_tokens = all_tok[n_prefix:]
+        cls_token = all_tok[0]
+
+    # 3. Manually compute the attention matrix from the intercepted QKV
+    qkv = saved_qkv[0]  # Shape: (1, T, 3 * D)
+    B, T, three_D = qkv.shape
+    D = three_D // 3
+    num_heads = last_block.attn.num_heads
+
+    # Reshape and split into Q, K, V: (1, num_heads, T, head_dim)
+    qkv = qkv.reshape(B, T, 3, num_heads, D // num_heads).permute(2, 0, 3, 1, 4)
+    q, k, v = qkv[0], qkv[1], qkv[2]
+
+    # Compute attention scores: Softmax((Q * scale) @ K^T)
+    scale = (D // num_heads) ** -0.5
+    q = q * scale
+    attn_matrix = q @ k.transpose(-2, -1)  # (1, num_heads, T, T)
+    attn_matrix = attn_matrix.softmax(dim=-1)
+
+    # Extract the CLS-to-patch attention
+    # CLS token is at index 0. Patch tokens are the last N tokens.
+    attn_raw = attn_matrix[0, :, 0, -N:].mean(dim=0)  # Average across heads -> (N,)
+
+    # Normalize to [0, 1]
+    lo, hi = attn_raw.min(), attn_raw.max()
+    attn_cls = (attn_raw - lo) / (hi - lo + 1e-8)
+
+    W_orig, H_orig = img_pil.size
+    return dict(
+        patch_tokens=patch_tokens,
+        cls_token=cls_token,
+        attn_cls=attn_cls,
+        grid_h=grid_h,
+        grid_w=grid_w,
+        W_orig=W_orig,
+        H_orig=H_orig,
+    )
+
+# ---------------------------------------------------------------------------
+# Polarity correction
+# ---------------------------------------------------------------------------
+
+def _fix_polarity_cls(
+    scores: np.ndarray,
+    patch_tokens: torch.Tensor,
+    cls_token: torch.Tensor,
+) -> np.ndarray:
+    """Flip a PCA component if it correlates negatively with CLS similarity.
+
+    DINOv2's CLS token is the global image summary.  Patches whose features
+    are most cosine-similar to the CLS token are empirically the foreground
+    regions.  We compute the Pearson correlation between the raw PC scores and
+    per-patch cosine similarity to CLS via z-score normalization (numerically
+    identical to np.corrcoef but stays float32 and handles constant inputs
+    safely via an eps guard).  If the correlation is negative, the component
+    points "away from foreground" and is flipped.
+
+    This approach works for any foreground/background area ratio — it makes no
+    assumption about the object being centered or small.
+
+    Args:
+        scores:       (N,) float32 raw PC projection values (any sign).
+        patch_tokens: (N, D) float32 patch feature tensor on DEVICE.
+        cls_token:    (D,)   float32 CLS feature tensor on DEVICE.
+
+    Returns:
+        (N,) float32 sign-corrected scores.
+    """
+    pt      = F.normalize(patch_tokens.float(), dim=1)
+    cls     = F.normalize(cls_token.float().unsqueeze(0), dim=1)
+    cos_sim = (pt @ cls.T).squeeze(1).cpu().numpy().astype(np.float32)
+
+    scores  = scores.astype(np.float32)
+    s_n = (scores  - scores.mean())  / (scores.std()  + 1e-8)
+    c_n = (cos_sim - cos_sim.mean()) / (cos_sim.std() + 1e-8)
+    if (s_n * c_n).mean() < 0:
+        scores = -scores
+    return scores
+
+
+# ---------------------------------------------------------------------------
+# Shared PCA base — the "pca3 best component" soft map
+# ---------------------------------------------------------------------------
+
+def _pca_soft_base(
+    fwd: dict,
+    n_components: int,
+    border: int,
+    center_frac: float,
+) -> np.ndarray:
+    """Compute the soft PCA base map shared by all PCA-based methods.
+
+    Runs PCA with ``n_components`` on the patch features, then selects the
+    single best component by center-vs-border contrast scoring.  The winning
+    component is polarity-corrected via CLS cosine similarity, then normalized
+    to [0, 1].  No binarization, no Gaussian blur.
+
+    Component selection heuristic
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    For each component × polarity pair, the score is:
+
+        center_mean(candidate) − border_mean(candidate)
+
+    where "center" is the central ``center_frac`` fraction of the patch grid
+    and "border" is the outer ``border``-patch ring.  The pair with the highest
+    score wins.  Polarity is handled *after* selection by CLS cosine similarity
+    (``_fix_polarity_cls``) — the selection score is used only to pick *which*
+    component to use, not to determine its final orientation.
+
+    Args:
+        fwd:          Output dict from ``_forward_once``.
+        n_components: How many PCA components to evaluate (e.g. 3).
+        border:       Border ring width in patches for scoring.
+        center_frac:  Central fraction of the grid for scoring.
+
+    Returns:
+        (N,) float32 soft map in [0, 1].
+    """
+    patch_tokens = fwd["patch_tokens"]
+    cls_token    = fwd["cls_token"]
+    grid_h       = fwd["grid_h"]
+    grid_w       = fwd["grid_w"]
+    N            = grid_h * grid_w
+
+    feat = patch_tokens.cpu().numpy().astype(np.float32)
+    feat -= feat.mean(axis=0, keepdims=True)
+
+    n_comp = min(n_components, feat.shape[0], feat.shape[1])
+    pca    = PCA(n_components=n_comp, whiten=False)
+    pcs    = pca.fit_transform(feat)               # (N, n_comp)
+
+    # --- Build center and border masks ------------------------------------
+    bm = np.zeros((grid_h, grid_w), dtype=bool)
+    bm[:border, :]  = True
+    bm[-border:, :] = True
+    bm[:, :border]  = True
+    bm[:, -border:] = True
+    border_flat = bm.flatten()
+
+    cm = np.zeros((grid_h, grid_w), dtype=bool)
+    h0 = max(int(grid_h * (0.5 - center_frac / 2)), 0)
+    h1 = min(int(grid_h * (0.5 + center_frac / 2)), grid_h)
+    w0 = max(int(grid_w * (0.5 - center_frac / 2)), 0)
+    w1 = min(int(grid_w * (0.5 + center_frac / 2)), grid_w)
+    cm[h0:h1, w0:w1] = True
+    center_flat = cm.flatten()
+
+    # --- Select best component by center-border contrast ------------------
+    best_score = -np.inf
+    best_comp  = 0
+    for i in range(n_comp):
+        for sign in (+1.0, -1.0):
+            cand   = sign * pcs[:, i]
+            lo, hi = cand.min(), cand.max()
+            cand_n = (cand - lo) / (hi - lo + 1e-8)
+            score  = cand_n[center_flat].mean() - cand_n[border_flat].mean()
+            if score > best_score:
+                best_score = score
+                best_comp  = i
+
+    print(f"[Dinov2Methods] PC{best_comp + 1} selected (center-border={best_score:.4f})")
+
+    # --- Polarity correction via CLS cosine similarity -------------------
+    raw = _fix_polarity_cls(pcs[:, best_comp].copy(), patch_tokens, cls_token)
+
+    # --- Normalize to [0, 1] — no threshold, no blur ---------------------
+    lo, hi = raw.min(), raw.max()
+    if hi - lo > 1e-8:
+        return ((raw - lo) / (hi - lo)).astype(np.float32)
+    return np.zeros(N, dtype=np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Per-method score extractors (all operate on pre-computed fwd dict)
+# ---------------------------------------------------------------------------
+
+def _scores_attn(fwd: dict) -> np.ndarray:
+    """Return (N,) float32 head-averaged CLS attention scores, already [0,1]."""
+    return fwd["attn_cls"].cpu().numpy().astype(np.float32)
+
+
+def _scores_pc1(fwd: dict, pc_base: np.ndarray) -> np.ndarray:
+    """Return (N,) float32 soft PC1 base map — directly the shared base."""
+    return pc_base
+
+
+def _scores_pc_eigenweighted(fwd: dict, n_components: int) -> np.ndarray:
+    """Return (N,) float32 explained-variance-weighted sum of PC1+PC2+PC3.
+
+    Each component is independently polarity-corrected and normalized to [0,1]
+    before being weighted by its explained variance ratio (re-normalized to
+    sum to 1 across the selected components).  This ensures the blend weights
+    reflect genuine variance contribution rather than raw projection scale.
+
+    Args:
+        fwd:          Output dict from ``_forward_once``.
+        n_components: Number of PCA components to use (capped at 3).
+
+    Returns:
+        (N,) float32 combined map in [0, 1].
+    """
+    patch_tokens = fwd["patch_tokens"]
+    cls_token    = fwd["cls_token"]
+
+    feat = patch_tokens.cpu().numpy().astype(np.float32)
+    feat -= feat.mean(axis=0, keepdims=True)
+
+    n_comp = min(n_components, feat.shape[0], feat.shape[1])
+    pca    = PCA(n_components=n_comp, whiten=False)
+    pcs    = pca.fit_transform(feat)
+
+    evr     = pca.explained_variance_ratio_
+    evr_sum = evr.sum()
+    weights = (evr / evr_sum).astype(np.float32) if evr_sum > 1e-12 \
+              else np.full(n_comp, 1.0 / n_comp, dtype=np.float32)
+
+    combined = np.zeros(pcs.shape[0], dtype=np.float32)
+    for k in range(n_comp):
+        comp = _fix_polarity_cls(pcs[:, k].copy(), patch_tokens, cls_token)
+        lo, hi = comp.min(), comp.max()
+        comp = ((comp - lo) / (hi - lo)).astype(np.float32) if hi - lo > 1e-8 \
+               else np.zeros_like(comp)
+        combined += weights[k] * comp
+
+    lo, hi = combined.min(), combined.max()
+    return ((combined - lo) / (hi - lo)).astype(np.float32) if hi - lo > 1e-8 \
+           else np.zeros_like(combined)
+
+
+def _scores_pc_l2(fwd: dict, n_components: int) -> np.ndarray:
+    """Return (N,) float32 L2 norm of each patch's projection onto PC1+PC2+PC3.
+
+    Squaring each projection before summing eliminates sign ambiguity without
+    needing polarity correction.  The L2 norm measures total distance from the
+    patch-feature mean in the 3-PC subspace, capturing any patch that is
+    semantically distinctive from the average — typically the subject.
+
+    Args:
+        fwd:          Output dict from ``_forward_once``.
+        n_components: Number of PCA components to use (capped at 3).
+
+    Returns:
+        (N,) float32 map in [0, 1].
+    """
+    patch_tokens = fwd["patch_tokens"]
+
+    feat = patch_tokens.cpu().numpy().astype(np.float32)
+    feat -= feat.mean(axis=0, keepdims=True)
+
+    n_comp = min(n_components, feat.shape[0], feat.shape[1])
+    pca    = PCA(n_components=n_comp, whiten=False)
+    pcs    = pca.fit_transform(feat)
+
+    l2 = np.linalg.norm(pcs, ord=2, axis=1).astype(np.float32)
+    lo, hi = l2.min(), l2.max()
+    return ((l2 - lo) / (hi - lo)).astype(np.float32) if hi - lo > 1e-8 \
+           else np.zeros_like(l2)
+
+
+def _map_entropy(scores_01: np.ndarray) -> float:
+    """Compute normalized Shannon entropy of a [0,1] score array.
+
+    Converts scores to a valid probability distribution (add eps, renormalize),
+    computes entropy in nats, then divides by log(N) to normalize to [0, 1].
+
+    Returns:
+        float in [0, 1]: 1 = completely flat (uninformative), 0 = perfect spike.
+    """
+    N = len(scores_01)
+    p = scores_01.astype(np.float64) + 1e-10
+    p = p / p.sum()
+    return float(np.clip(-np.sum(p * np.log(p)) / np.log(N), 0.0, 1.0))
+
+
+def _scores_combo_fixed(attn: np.ndarray, pc1: np.ndarray) -> np.ndarray:
+    """Return (N,) float32 fixed equal-weight blend: 0.5 × attn + 0.5 × PC1."""
+    return (0.5 * attn + 0.5 * pc1).astype(np.float32)
+
+
+def _scores_combo_entropy(attn: np.ndarray, pc1: np.ndarray) -> np.ndarray:
+    """Return (N,) float32 entropy-weighted blend of attention and PC1.
+
+    Each map's informativeness weight is ``1 − normalized_entropy``.  The two
+    weights are normalized to sum to 1.  A flat map is automatically suppressed
+    in favor of the sharper signal.  Falls back to 0.5/0.5 when both maps are
+    equally degenerate (both weights near zero).
+
+    Args:
+        attn: (N,) float32 attention scores in [0, 1].
+        pc1:  (N,) float32 soft PCA scores in [0, 1].
+
+    Returns:
+        (N,) float32 blended map in [0, 1].
+    """
+    w_attn = 1.0 - _map_entropy(attn)
+    w_pc1  = 1.0 - _map_entropy(pc1)
+    denom  = w_attn + w_pc1
+    if denom < 1e-8:
+        w_attn, w_pc1 = 0.5, 0.5
+    else:
+        w_attn, w_pc1 = w_attn / denom, w_pc1 / denom
+    return (w_attn * attn + w_pc1 * pc1).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Output formatting
+# ---------------------------------------------------------------------------
+
+def _to_output_tensor(
+    scores: np.ndarray,
+    grid_h: int,
+    grid_w: int,
+    H_out: int,
+    W_out: int,
+) -> np.ndarray:
+    """Reshape (N,) patch scores to a (H_out, W_out) heatmap.
+
+    Bilinearly upsamples from the patch grid to the original image resolution,
+    then re-normalizes to [0, 1] to correct any interpolation-induced drift.
+
+    Args:
+        scores:       (N,) float32 values in [0, 1].
+        grid_h, grid_w: patch grid dimensions.
+        H_out, W_out: target spatial dimensions.
+
+    Returns:
+        (H_out, W_out) float32 numpy array in [0, 1].
+    """
+    t  = torch.from_numpy(scores).reshape(1, 1, grid_h, grid_w).float()
+    t  = F.interpolate(t, size=(H_out, W_out), mode="bilinear", align_corners=False)
+    t  = t.squeeze()
+    lo, hi = t.min(), t.max()
+    if (hi - lo).abs() > 1e-8:
+        t = (t - lo) / (hi - lo)
+    return t.numpy()
 
 
 # ===========================================================================
-# Method 1 – PCA + Gaussian
+# Public AttributionMethod classes
 # ===========================================================================
 
-class Dinov2PcaGaussianMethod(AttributionMethod):
-    """
-    Attribution method using DINOv2 patch features + PCA + soft heatmap.
+class Dinov2AllMethodsBase(AttributionMethod):
+    """Shared base for all six DINOv2 attribution methods.
 
-    Pipeline per image
-    ------------------
-    1. Forward pass through DINOv2 (HuggingFace Transformers).
-    2. Extract patch-token features from the last hidden state, dynamically
-       skipping CLS + any register tokens.
-    3. Run PCA over the first ``n_components`` components.
-    4. Select the best (component, polarity) pair by "center-vs-border contrast":
-       the component whose high values cluster in the image center (object) and
-       low values live at the border (background) wins.
-    5. Threshold at ``threshold_q`` quantile → binary foreground mask.
-    6. Distance Transform → soft heatmap (no Gaussian smoothing).
-
-    Configuration keys read from ``config``
-    ----------------------------------------
-    DINO_PCA_USE_REGISTERS  bool   True   – use facebook/dinov2-with-registers-small
-    DINO_PCA_N_COMPONENTS   int    5      – PCA components to evaluate
-    DINO_PCA_THRESHOLD_Q    float  0.5    – foreground quantile threshold
-    DINO_PCA_BORDER         int    1      – border-patch width for scoring
-    DINO_PCA_CENTER_FRAC    float  0.4    – center-region fraction for scoring
+    Handles model loading, configuration knobs, and the single shared forward
+    pass.  Subclasses implement only ``_scores_from_fwd``.
     """
 
-    def __init__(self) -> None:
-        super().__init__("dinov2_pca_gaussian")
+    def __init__(self, method_name: str) -> None:
+        super().__init__(method_name)
+        self.use_registers: bool  = getattr(config, "DINO_PCA_USE_REGISTERS", True)
+        self.n_components:  int   = getattr(config, "DINO_PCA_N_COMPONENTS",  3)
+        self.border:        int   = getattr(config, "DINO_PCA_BORDER",        1)
+        self.center_frac:   float = getattr(config, "DINO_PCA_CENTER_FRAC",   0.4)
+        self._model = None
 
-        # Pull all knobs from config, with safe defaults
-        self.use_registers:  bool  = getattr(config, "DINO_PCA_USE_REGISTERS", True)
-        self.n_components:   int   = getattr(config, "DINO_PCA_N_COMPONENTS",  5)
-        self.threshold_q:    float = getattr(config, "DINO_PCA_THRESHOLD_Q",   0.5)
-        self.border:         int   = getattr(config, "DINO_PCA_BORDER",        1)
-        self.center_frac:    float = getattr(config, "DINO_PCA_CENTER_FRAC",   0.4)
+    def _get_model(self):
+        if self._model is None:
+            self._model = _ensure_model(self.use_registers)
+        return self._model
 
-        # Lazily loaded in _ensure_model()
-        self._processor: Optional[AutoImageProcessor] = None
-        self._dino_model: Optional[Dinov2Model] = None
+    def _shared_forward(self, img_pil: Image.Image) -> tuple[dict, np.ndarray]:
+        """Run the shared forward pass and compute the soft PCA base map.
 
-    # ------------------------------------------------------------------
-    # Model management
-    # ------------------------------------------------------------------
-
-    def _ensure_model(self) -> None:
-        """Load and cache the DINOv2 HuggingFace model (called once on first use)."""
-        cache_key = "reg" if self.use_registers else "std"
-        if cache_key not in _PCA_MODEL_CACHE:
-            model_name = (
-                "facebook/dinov2-with-registers-small"
-                if self.use_registers
-                else "facebook/dinov2-base"
-            )
-            print(f"[Dinov2PcaGaussianMethod] Loading {model_name} on {DEVICE} …")
-            processor = AutoImageProcessor.from_pretrained(model_name)
-            model = Dinov2Model.from_pretrained(model_name).to(DEVICE)
-            model.eval()
-            _PCA_MODEL_CACHE[cache_key] = (processor, model)
-
-        self._processor, self._dino_model = _PCA_MODEL_CACHE[cache_key]
-
-    # ------------------------------------------------------------------
-    # Internal: component selection (the robust inversion logic)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _border_mask(grid_h: int, grid_w: int, border: int) -> np.ndarray:
-        """Boolean mask — True at border patches (likely background)."""
-        m = np.zeros((grid_h, grid_w), dtype=bool)
-        m[:border, :]  = True
-        m[-border:, :] = True
-        m[:, :border]  = True
-        m[:, -border:] = True
-        return m
-
-    @staticmethod
-    def _center_mask(grid_h: int, grid_w: int, center_frac: float) -> np.ndarray:
-        """Boolean mask — True for the central rectangle (likely object)."""
-        m  = np.zeros((grid_h, grid_w), dtype=bool)
-        h0 = max(int(grid_h * (0.5 - center_frac / 2)), 0)
-        h1 = min(int(grid_h * (0.5 + center_frac / 2)), grid_h)
-        w0 = max(int(grid_w * (0.5 - center_frac / 2)), 0)
-        w1 = min(int(grid_w * (0.5 + center_frac / 2)), grid_w)
-        m[h0:h1, w0:w1] = True
-        return m
-
-    def _select_best_component(
-        self,
-        pca_features: np.ndarray,
-        grid_h: int,
-        grid_w: int,
-    ) -> tuple[np.ndarray, int, float]:
+        Returns:
+            fwd:     Full forward-pass dict (tokens, attention, grid info).
+            pc_base: (N,) float32 soft PCA map in [0, 1] — the shared base.
         """
-        Evaluate every component × polarity pair and return the one that best
-        separates the image center from the image border.
+        fwd     = _forward_once(self._get_model(), img_pil)
+        pc_base = _pca_soft_base(fwd, self.n_components, self.border, self.center_frac)
+        return fwd, pc_base
 
-        Returns
-        -------
-        best_map   : (grid_h, grid_w) normalized foreground map in [0, 1]
-        best_comp  : 0-based index of the winning PCA component
-        best_score : center_mean - border_mean score of the winner
-        """
-        border_flat = self._border_mask(grid_h, grid_w, self.border).flatten()
-        center_flat = self._center_mask(grid_h, grid_w, self.center_frac).flatten()
-
-        best_map:   Optional[np.ndarray] = None
-        best_score: float = -np.inf
-        best_comp:  int   = 0
-
-        n = min(self.n_components, pca_features.shape[1])
-        for i in range(n):
-            for sign in (+1.0, -1.0):
-                candidate = _normalize(sign * pca_features[:, i])
-                score = candidate[center_flat].mean() - candidate[border_flat].mean()
-                if score > best_score:
-                    best_score = score
-                    best_map   = candidate.reshape(grid_h, grid_w)
-                    best_comp  = i
-
-        return best_map, best_comp, best_score  # type: ignore[return-value]
-
-    # ------------------------------------------------------------------
-    # Internal: single-image heatmap
-    # ------------------------------------------------------------------
+    def _scores_from_fwd(self, fwd: dict, pc_base: np.ndarray) -> np.ndarray:
+        """Override in subclasses: return (N,) float32 patch-level scores."""
+        raise NotImplementedError
 
     def _heatmap_single(self, img_pil: Image.Image) -> np.ndarray:
-        """Return a (H, W) soft heatmap in [0,1] for one PIL image."""
-        inputs = self._processor(images=img_pil, return_tensors="pt").to(DEVICE)
-
-        h = inputs["pixel_values"].shape[2]
-        w = inputs["pixel_values"].shape[3]
-        grid_h = h // _PATCH_SIZE
-        grid_w = w // _PATCH_SIZE
-        num_patches = grid_h * grid_w
-
-        with torch.no_grad():
-            outputs = self._dino_model(**inputs)
-            seq_len = outputs.last_hidden_state.shape[1]
-
-            num_extra = seq_len - num_patches
-            if num_extra < 0:
-                raise RuntimeError(
-                    f"[Dinov2PcaGaussianMethod] Token count mismatch: "
-                    f"seq_len={seq_len}, expected_patches={num_patches}"
-                )
-            # Skip CLS + register tokens; keep only patch tokens
-            features = outputs.last_hidden_state[:, num_extra:, :]
-
-        features_np = features.squeeze(0).cpu().numpy()  # (num_patches, hidden_dim)
-
-        pca = PCA(n_components=self.n_components)
-        pca_features = pca.fit_transform(features_np)
-
-        pca_map, best_comp, score = self._select_best_component(
-            pca_features, grid_h, grid_w
+        fwd, pc_base = self._shared_forward(img_pil)
+        scores = self._scores_from_fwd(fwd, pc_base)
+        return _to_output_tensor(
+            scores, fwd["grid_h"], fwd["grid_w"], fwd["H_orig"], fwd["W_orig"]
         )
-        print(
-            f"[Dinov2PcaGaussianMethod] PC{best_comp + 1} selected  "
-            f"(center-border score={score:.4f})"
-        )
-
-        # Binary foreground mask → resize to original image dimensions
-        binary_mask = (pca_map > np.quantile(pca_map, self.threshold_q)).astype(float)
-        W_orig, H_orig = img_pil.size                          # PIL: (W, H)
-        binary_mask = cv2.resize(binary_mask, (W_orig, H_orig))
-
-        return binary_mask
-
-    # ------------------------------------------------------------------
-    # Public interface
-    # ------------------------------------------------------------------
 
     def compute(
         self,
-        model,                      # unused — DINOv2 is self-contained
-        images: torch.Tensor,       # (B, C, H, W) ImageNet-normalized
-        targets: torch.Tensor,      # (B,) — unused (unsupervised method)
+        model,                   # unused — DINOv2 is self-contained
+        images: torch.Tensor,    # (B, C, H, W) ImageNet-normalized float32
+        targets: torch.Tensor,   # (B,) — unsupervised, not used
     ) -> torch.Tensor:
-        """
-        Compute PCA-based Gaussian heatmaps for a batch of images.
+        """Compute heatmaps for a batch of images.
 
         Args:
-            model:   Unused (required by AttributionMethod interface).
-            images:  Batch tensor (B, C, H, W), ImageNet-normalized float32.
-            targets: Target class indices (B,) — not used by this method.
+            model:   Ignored. DINOv2 is loaded internally.
+            images:  Float32 tensor (B, C, H, W), ImageNet-normalized.
+            targets: Unused. Accepted for interface compatibility.
 
         Returns:
-            Tensor of shape (B, H, W), dtype float32, values in [0, 1].
-            The spatial dimensions match the input ``images``.
+            Float32 tensor (B, H, W) in [0, 1].
         """
-        self._ensure_model()
-
         B, C, H, W = images.shape
-        pil_images = _tensor_batch_to_pil(images)
+        pil_images = _tensor_to_pil(images)
+        heatmaps   = np.stack([self._heatmap_single(p) for p in pil_images], axis=0)
 
-        heatmaps = np.stack(
-            [self._heatmap_single(pil_img) for pil_img in pil_images],
-            axis=0,
-        )  # (B, H_pil, W_pil)  — H_pil may differ from H if processor rescaled
-
-        # Resize to match the original tensor spatial dimensions if needed
         if heatmaps.shape[1] != H or heatmaps.shape[2] != W:
-            heatmaps_t = torch.from_numpy(heatmaps).unsqueeze(1).float()  # (B,1,h,w)
-            heatmaps_t = F.interpolate(
-                heatmaps_t, size=(H, W), mode="bilinear", align_corners=False
-            )
-            heatmaps = heatmaps_t.squeeze(1).numpy()                       # (B,H,W)
+            ht = torch.from_numpy(heatmaps).unsqueeze(1).float()
+            ht = F.interpolate(ht, size=(H, W), mode="bilinear", align_corners=False)
+            heatmaps = ht.squeeze(1).numpy()
 
         return torch.from_numpy(heatmaps).float()
 
 
-# ===========================================================================
-# Method 2 – CLS Self-Attention
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# Method 1 — DINO_ATTN
+# ---------------------------------------------------------------------------
 
-class Dinov2AttentionMethod(AttributionMethod):
-    """
-    Attribution method using DINOv2 CLS-token self-attention maps.
+class Dinov2AttnMethod(Dinov2AllMethodsBase):
+    """Attribution via head-averaged CLS-to-patch self-attention.
 
-    Pipeline per image
-    ------------------
-    1. Resize & normalize the image to 518×518 (optimal for DINOv2 patch grid).
-    2. Forward pass through DINOv2 (torch.hub), intercepting the last block's
-       self-attention matrix.
-    3. Average across all heads → CLS-token attention vector over all tokens.
-    4. Discard non-patch tokens (CLS + registers); take the last num_patches
-       entries and reshape to (grid_h, grid_w).
-    5. Resize to original image dimensions.
+    Uses the last transformer block's attention weights.  The CLS token's
+    attention distribution over patch tokens directly encodes which spatial
+    regions contributed most to the global representation.  No PCA is involved;
+    the soft PCA base is computed but not used here (it comes for free from the
+    shared forward pass used by other methods in the same batch).
 
-    Configuration keys read from ``config``
-    ----------------------------------------
-    DINO_ATTENTION_USE_REGISTERS  bool   True  – use dinov2_vits14_reg
-    """
-
-    # ImageNet normalization transform for the attention branch
-    _transform = transforms.Compose([
-        transforms.Resize(_ATTN_IMAGE_SIZE),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
-    ])
-
-    def __init__(self) -> None:
-        super().__init__("dinov2_attention")
-
-        self.use_registers:  bool  = getattr(config, "DINO_ATTENTION_USE_REGISTERS", True)
-        # Gaussian smoothing intentionally disabled for this project.
-        self.smooth_sigma: float = 0.0
-
-        self._dino_model = None  # lazily loaded
-
-    # ------------------------------------------------------------------
-    # Model management
-    # ------------------------------------------------------------------
-
-    def _ensure_model(self) -> None:
-        """Load and cache the DINOv2 torch.hub model (called once on first use)."""
-        cache_key = "reg" if self.use_registers else "std"
-        if cache_key not in _ATTN_MODEL_CACHE:
-            model_name = "dinov2_vits14_reg" if self.use_registers else "dinov2_vits14"
-            print(f"[Dinov2AttentionMethod] Loading {model_name} on {DEVICE} …")
-            m = torch.hub.load("facebookresearch/dinov2", model_name, verbose=False)
-            m.to(DEVICE)
-            m.eval()
-            _ATTN_MODEL_CACHE[cache_key] = m
-
-        self._dino_model = _ATTN_MODEL_CACHE[cache_key]
-
-    # ------------------------------------------------------------------
-    # Internal: attention extraction
-    # ------------------------------------------------------------------
-
-    def _extract_attention(self, img_batch: torch.Tensor) -> torch.Tensor:
-        """
-        Extract the last-block self-attention tensor for a pre-processed batch.
-
-        Args:
-            img_batch: (B, C, H, W) tensor already resized & normalized to
-                       _ATTN_IMAGE_SIZE and on DEVICE.
-
-        Returns:
-            attn: (B, num_heads, N, N) attention tensor on DEVICE.
-                  N = 1 + num_registers + num_patches  (all tokens).
-        """
-        model = self._dino_model
-
-        with torch.no_grad():
-            # Prefer the native helper when available (cleaner, model-version agnostic)
-            if hasattr(model, "get_last_selfattention"):
-                return model.get_last_selfattention(img_batch)
-
-            # Manual fallback: run all blocks, intercept QK in the last one
-            x = model.prepare_tokens_with_masks(img_batch)
-            for i, blk in enumerate(model.blocks):
-                if i < len(model.blocks) - 1:
-                    x = blk(x)
-                else:
-                    # Last block: compute attention weights manually
-                    x_norm = blk.norm1(x)
-                    qkv    = blk.attn.qkv(x_norm)
-                    B, N, C = x_norm.shape
-                    nh  = blk.attn.num_heads
-                    hd  = C // nh
-                    qkv = qkv.reshape(B, N, 3, nh, hd).permute(2, 0, 3, 1, 4)
-                    q, k = qkv[0], qkv[1]
-                    attn = (q @ k.transpose(-2, -1)) * (hd ** -0.5)
-                    return attn.softmax(dim=-1)   # (B, nh, N, N)
-
-        raise RuntimeError("[Dinov2AttentionMethod] Could not extract attention.")
-
-    # ------------------------------------------------------------------
-    # Internal: single-image heatmap
-    # ------------------------------------------------------------------
-
-    def _heatmap_single(self, img_pil: Image.Image) -> np.ndarray:
-        """Return a (H_orig, W_orig) attention map in [0,1] for one PIL image."""
-        W_orig, H_orig = img_pil.size
-
-        img_tensor = self._transform(img_pil).unsqueeze(0).to(DEVICE)  # (1, C, 518, 518)
-
-        attn = self._extract_attention(img_tensor)   # (1, nh, N, N)
-
-        # Average over heads; CLS attends from position 0
-        attn_cls = attn[0, :, 0, :].mean(dim=0)     # (N,)
-
-        # Patch grid dimensions from the actual tensor size
-        grid_h = img_tensor.shape[2] // _PATCH_SIZE
-        grid_w = img_tensor.shape[3] // _PATCH_SIZE
-        num_patches = grid_h * grid_w
-
-        # Non-patch tokens (CLS + registers) appear at the front of the sequence.
-        # Patch tokens are always the last num_patches entries.
-        patch_attn = attn_cls[-num_patches:]                             # (num_patches,)
-        attn_map   = patch_attn.reshape(grid_h, grid_w).cpu().numpy()
-        attn_map   = _normalize(attn_map)
-
-        # Resize to original image spatial dimensions
-        return cv2.resize(attn_map, (W_orig, H_orig))
-
-    # ------------------------------------------------------------------
-    # Public interface
-    # ------------------------------------------------------------------
-
-    def compute(
-        self,
-        model,                      # unused — DINOv2 is self-contained
-        images: torch.Tensor,       # (B, C, H, W) ImageNet-normalized
-        targets: torch.Tensor,      # (B,) — unused
-    ) -> torch.Tensor:
-        """
-        Compute attention-based heatmaps for a batch of images.
-
-        Args:
-            model:   Unused (required by AttributionMethod interface).
-            images:  Batch tensor (B, C, H, W), ImageNet-normalized float32.
-            targets: Target class indices (B,) — not used by this method.
-
-        Returns:
-            Tensor of shape (B, H, W), dtype float32, values in [0, 1].
-            The spatial dimensions match the input ``images``.
-        """
-        self._ensure_model()
-
-        B, C, H, W = images.shape
-        pil_images = _tensor_batch_to_pil(images)
-
-        heatmaps = np.stack(
-            [self._heatmap_single(pil_img) for pil_img in pil_images],
-            axis=0,
-        )  # (B, H_orig, W_orig)
-
-        # Resize to match the original tensor spatial dimensions if needed
-        if heatmaps.shape[1] != H or heatmaps.shape[2] != W:
-            heatmaps_t = torch.from_numpy(heatmaps).unsqueeze(1).float()  # (B,1,h,w)
-            heatmaps_t = F.interpolate(
-                heatmaps_t, size=(H, W), mode="bilinear", align_corners=False
-            )
-            heatmaps = heatmaps_t.squeeze(1).numpy()                       # (B,H,W)
-
-        return torch.from_numpy(heatmaps).float()
-
-
-# ===========================================================================
-# Method 3 – PCA (1 component, no Gaussian)
-# ===========================================================================
-
-class Dinov2Pca1Method(AttributionMethod):
-    """
-    PCA attribution using **only the 1st PCA component**, producing a continuous
-    heatmap without thresholding or Gaussian blur.
-
-    Name: "pca1"
+    Signal: continuous probability distribution (softmax), no thresholding.
     """
 
     def __init__(self) -> None:
-        super().__init__("pca1")
-        self.use_registers: bool = getattr(config, "DINO_PCA_USE_REGISTERS", True)
-        self.center_frac: float = getattr(config, "DINO_PCA_CENTER_FRAC", 0.4)
-        self.border: int = getattr(config, "DINO_PCA_BORDER", 1)
-        self._processor: Optional[AutoImageProcessor] = None
-        self._dino_model: Optional[Dinov2Model] = None
+        super().__init__("dinov2_attn")
 
-    def _ensure_model(self) -> None:
-        cache_key = "reg" if self.use_registers else "std"
-        if cache_key not in _PCA_MODEL_CACHE:
-            model_name = (
-                "facebook/dinov2-with-registers-small"
-                if self.use_registers
-                else "facebook/dinov2-base"
-            )
-            print(f"[Dinov2Pca1Method] Loading {model_name} on {DEVICE} …")
-            processor = AutoImageProcessor.from_pretrained(model_name)
-            model = Dinov2Model.from_pretrained(model_name).to(DEVICE)
-            model.eval()
-            _PCA_MODEL_CACHE[cache_key] = (processor, model)
-
-        self._processor, self._dino_model = _PCA_MODEL_CACHE[cache_key]
-
-    @staticmethod
-    def _border_mask(grid_h: int, grid_w: int, border: int) -> np.ndarray:
-        m = np.zeros((grid_h, grid_w), dtype=bool)
-        m[:border, :] = True
-        m[-border:, :] = True
-        m[:, :border] = True
-        m[:, -border:] = True
-        return m
-
-    @staticmethod
-    def _center_mask(grid_h: int, grid_w: int, center_frac: float) -> np.ndarray:
-        m = np.zeros((grid_h, grid_w), dtype=bool)
-        h0 = max(int(grid_h * (0.5 - center_frac / 2)), 0)
-        h1 = min(int(grid_h * (0.5 + center_frac / 2)), grid_h)
-        w0 = max(int(grid_w * (0.5 - center_frac / 2)), 0)
-        w1 = min(int(grid_w * (0.5 + center_frac / 2)), grid_w)
-        m[h0:h1, w0:w1] = True
-        return m
-
-    def _heatmap_single(self, img_pil: Image.Image) -> np.ndarray:
-        inputs = self._processor(images=img_pil, return_tensors="pt").to(DEVICE)
-
-        h = inputs["pixel_values"].shape[2]
-        w = inputs["pixel_values"].shape[3]
-        grid_h = h // _PATCH_SIZE
-        grid_w = w // _PATCH_SIZE
-        num_patches = grid_h * grid_w
-
-        with torch.no_grad():
-            outputs = self._dino_model(**inputs)
-            seq_len = outputs.last_hidden_state.shape[1]
-            num_extra = seq_len - num_patches
-            features = outputs.last_hidden_state[:, num_extra:, :]
-
-        features_np = features.squeeze(0).cpu().numpy()
-        pc1 = PCA(n_components=1).fit_transform(features_np)[:, 0]  # (num_patches,)
-
-        border_flat = self._border_mask(grid_h, grid_w, self.border).flatten()
-        center_flat = self._center_mask(grid_h, grid_w, self.center_frac).flatten()
-
-        pos = _normalize(pc1)
-        neg = _normalize(-pc1)
-        pos_score = pos[center_flat].mean() - pos[border_flat].mean()
-        neg_score = neg[center_flat].mean() - neg[border_flat].mean()
-        pc1_norm = pos if pos_score >= neg_score else neg
-
-        pca_map = pc1_norm.reshape(grid_h, grid_w)
-        W_orig, H_orig = img_pil.size
-        return cv2.resize(pca_map, (W_orig, H_orig))
-
-    def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        self._ensure_model()
-
-        B, C, H, W = images.shape
-        pil_images = _tensor_batch_to_pil(images)
-
-        heatmaps = np.stack([self._heatmap_single(p) for p in pil_images], axis=0)
-
-        if heatmaps.shape[1] != H or heatmaps.shape[2] != W:
-            heatmaps_t = torch.from_numpy(heatmaps).unsqueeze(1).float()
-            heatmaps_t = F.interpolate(heatmaps_t, size=(H, W), mode="bilinear", align_corners=False)
-            heatmaps = heatmaps_t.squeeze(1).numpy()
-
-        # Ensure [0,1] per sample (resize can introduce tiny out-of-range)
-        heatmaps = np.stack([_normalize(hm) for hm in heatmaps], axis=0)
-        return torch.from_numpy(heatmaps).float()
+    def _scores_from_fwd(self, fwd: dict, pc_base: np.ndarray) -> np.ndarray:
+        return _scores_attn(fwd)
 
 
-# ===========================================================================
-# Method 4 – Sum(PCA-Gaussian + Attention)
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# Method 2 — DINO_PC1
+# ---------------------------------------------------------------------------
 
-class SumDinoMethod(AttributionMethod):
-    """
-    Sum of Dinov2AttentionMethod and Dinov2PcaGaussianMethod.
+class Dinov2Pc1Method(Dinov2AllMethodsBase):
+    """Attribution via the single best soft PCA component.
 
-    Name: "sumDino"
+    Directly returns the shared soft PCA base map: the best component (among
+    the first ``DINO_PCA_N_COMPONENTS``) selected by center-border contrast
+    scoring, polarity-corrected by CLS cosine similarity, normalized to [0,1].
+
+    No binarization, no Gaussian blur, no distance transform.
     """
 
     def __init__(self) -> None:
-        super().__init__("sumDino")
-        self._pca = Dinov2PcaGaussianMethod()
-        self._attn = Dinov2AttentionMethod()
-        self.pca_weight = 0.5
-        self.attn_weight = 0.5
+        super().__init__("dinov2_pc1")
 
-    def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        pca = self._pca.compute(model, images, targets)
-        attn = self._attn.compute(model, images, targets)
-        summed = pca*self.pca_weight + attn*self.attn_weight
-        # Per-sample normalize to [0,1]
-        out = []
-        for i in range(summed.shape[0]):
-            out.append(self._normalize_attribution(summed[i : i + 1])[0])
-        return torch.stack(out, dim=0)
+    def _scores_from_fwd(self, fwd: dict, pc_base: np.ndarray) -> np.ndarray:
+        return _scores_pc1(fwd, pc_base)
+
+
+# ---------------------------------------------------------------------------
+# Method 3 — DINO_PC_EV
+# ---------------------------------------------------------------------------
+
+class Dinov2PcEigenweightedMethod(Dinov2AllMethodsBase):
+    """Attribution via explained-variance-weighted PC1 + PC2 + PC3.
+
+    Runs a fresh 3-component PCA (independent of the base map's single-component
+    selection), polarity-corrects each component via CLS cosine similarity,
+    normalizes each independently to [0, 1], then blends by explained variance
+    ratio.  Captures textures and complex multi-part objects better than PC1 alone.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("dinov2_pc_ev")
+
+    def _scores_from_fwd(self, fwd: dict, pc_base: np.ndarray) -> np.ndarray:
+        return _scores_pc_eigenweighted(fwd, self.n_components)
+
+
+# ---------------------------------------------------------------------------
+# Method 4 — DINO_PC_L2
+# ---------------------------------------------------------------------------
+
+class Dinov2PcL2Method(Dinov2AllMethodsBase):
+    """Attribution via L2 norm of patch projections onto PC1 + PC2 + PC3.
+
+    Squaring each projection before summing eliminates sign ambiguity without
+    needing polarity correction.  Measures total distance from the feature mean
+    in the 3-PC subspace — any semantically distinctive patch scores high,
+    producing broad spatial activation complementary to PC1.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("dinov2_pc_l2")
+
+    def _scores_from_fwd(self, fwd: dict, pc_base: np.ndarray) -> np.ndarray:
+        return _scores_pc_l2(fwd, self.n_components)
+
+
+# ---------------------------------------------------------------------------
+# Method 5 — COMBO_FIXED
+# ---------------------------------------------------------------------------
+
+class Dinov2ComboFixedMethod(Dinov2AllMethodsBase):
+    """Attribution via fixed equal-weight blend of attention and PC1.
+
+    Both maps are independently in [0, 1] before blending (attention is
+    normalized in ``_forward_once``; PC1 is the soft base map).  The 0.5/0.5
+    split is therefore a genuine equal contribution.  Blending is performed at
+    patch resolution before a single upsample call to avoid double interpolation.
+
+    Scientific use: diagnostic baseline — if this outperforms both individual
+    methods, the two signals are genuinely complementary.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("dinov2_combo_fixed")
+
+    def _scores_from_fwd(self, fwd: dict, pc_base: np.ndarray) -> np.ndarray:
+        return _scores_combo_fixed(_scores_attn(fwd), pc_base)
+
+
+# ---------------------------------------------------------------------------
+# Method 6 — COMBO_ENT
+# ---------------------------------------------------------------------------
+
+class Dinov2ComboEntropyMethod(Dinov2AllMethodsBase):
+    """Attribution via entropy-adaptive blend of attention and PC1.
+
+    Each map's informativeness weight is ``1 − normalized_Shannon_entropy``.
+    A flat, uninformative map is automatically suppressed in favor of the
+    sharper signal.  Falls back to 0.5/0.5 when both maps are equally
+    degenerate.  This is the most robust combo method for diverse datasets.
+
+    Advantage over COMBO_FIXED: if one signal is "mushy" for a given image
+    (e.g. attention spreads uniformly over a cluttered background), the entropy
+    weight automatically reduces its contribution without any manual tuning.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("dinov2_combo_ent")
+
+    def _scores_from_fwd(self, fwd: dict, pc_base: np.ndarray) -> np.ndarray:
+        return _scores_combo_entropy(_scores_attn(fwd), pc_base)
+
+
+#
+# import cv2
+# import numpy as np
+# import torch
+# import torch.nn.functional as F
+# from PIL import Image
+# from scipy.ndimage import gaussian_filter
+# from sklearn.decomposition import PCA
+# from torchvision import transforms
+# from transformers import AutoImageProcessor, Dinov2Model
+#
+# import config
+# from attribution.base import AttributionMethod
+#
+#
+# def _create_soft_heatmap(binary_mask: np.ndarray, sigma: float = 10.0) -> np.ndarray:
+#     """
+#     Turn a binary mask into a smooth XAI-style heatmap.
+#
+#     Pipeline:
+#       1. Distance Transform  → high values at object center, zero at background
+#       2. Gaussian blur       → smooth, natural-looking attribution blob
+#       3. Normalize to [0, 1]
+#
+#     Using cv2.GaussianBlur (faster than scipy for 2-D arrays).
+#     ksize=(0,0) lets OpenCV auto-compute kernel size from sigma.
+#     """
+#     mask_uint8 = (binary_mask * 255).astype(np.uint8)
+#     dist = cv2.distanceTransform(mask_uint8, cv2.DIST_L2, 5)
+#     heatmap = cv2.GaussianBlur(dist, ksize=(0, 0), sigmaX=sigma, sigmaY=sigma)
+#     mx = heatmap.max()
+#     if mx > 0:
+#         heatmap = (heatmap - heatmap.min()) / (mx - heatmap.min() + 1e-8)
+#     return heatmap
+#
+#
+# def _tensor_batch_to_pil(images: torch.Tensor) -> list[Image.Image]:
+#     """
+#     Convert a (B, C, H, W) float tensor (ImageNet-normalized) back to PIL images.
+#     Used so the HuggingFace processor can re-encode them cleanly.
+#     """
+#     mean = torch.tensor(_IMAGENET_MEAN, device=images.device).view(1, 3, 1, 1)
+#     std  = torch.tensor(_IMAGENET_STD,  device=images.device).view(1, 3, 1, 1)
+#     imgs_rgb = (images * std + mean).clamp(0, 1)          # un-normalize
+#     imgs_uint8 = (imgs_rgb * 255).byte().cpu()            # → uint8
+#     return [
+#         Image.fromarray(imgs_uint8[i].permute(1, 2, 0).numpy())
+#         for i in range(imgs_uint8.shape[0])
+#     ]
+#
+#
+# # ---------------------------------------------------------------------------
+# # Shared model caches  (one per method family to avoid cross-contamination)
+# # ---------------------------------------------------------------------------
+# _PCA_MODEL_CACHE:  dict[str, tuple] = {}   # key: "std" | "reg"  → (processor, model)
+# _ATTN_MODEL_CACHE: dict[str, object] = {}  # key: "std" | "reg"  → torch.hub model
+#
+# def _normalize(arr: np.ndarray) -> np.ndarray:
+#     """Min-max normalize a numpy array to [0, 1]."""
+#     mn, mx = arr.min(), arr.max()
+#     return (arr - mn) / (mx - mn + 1e-8)
+#
+# # ===========================================================================
+# # Method 1 – PCA + Gaussian
+# # ===========================================================================
+#
+# class Dinov2PcaGaussianMethod(AttributionMethod):
+#     """
+#     Attribution method using DINOv2 patch features + PCA + Gaussian soft heatmap.
+#
+#     Pipeline per image
+#     ------------------
+#     1. Forward pass through DINOv2 (HuggingFace Transformers).
+#     2. Extract patch-token features from the last hidden state, dynamically
+#        skipping CLS + any register tokens.
+#     3. Run PCA over the first ``n_components`` components.
+#     4. Select the best (component, polarity) pair by "center-vs-border contrast":
+#        the component whose high values cluster in the image center (object) and
+#        low values live at the border (background) wins.
+#     5. Threshold at ``threshold_q`` quantile → binary foreground mask.
+#     6. Distance Transform + Gaussian blur → smooth soft heatmap.
+#
+#     Configuration keys read from ``config``
+#     ----------------------------------------
+#     DINO_PCA_USE_REGISTERS  bool   True   – use facebook/dinov2-with-registers-small
+#     DINO_PCA_N_COMPONENTS   int    5      – PCA components to evaluate
+#     DINO_PCA_THRESHOLD_Q    float  0.5    – foreground quantile threshold
+#     DINO_PCA_SIGMA          float  10.0   – Gaussian blur strength
+#     DINO_PCA_BORDER         int    1      – border-patch width for scoring
+#     DINO_PCA_CENTER_FRAC    float  0.4    – center-region fraction for scoring
+#     """
+#
+#     def __init__(self) -> None:
+#         super().__init__("dinov2_pca_gaussian")
+#
+#         # Pull all knobs from config, with safe defaults
+#         self.use_registers:  bool  = getattr(config, "DINO_PCA_USE_REGISTERS", True)
+#         self.n_components:   int   = getattr(config, "DINO_PCA_N_COMPONENTS",  5)
+#         self.threshold_q:    float = getattr(config, "DINO_PCA_THRESHOLD_Q",   0.5)
+#         self.sigma:          float = getattr(config, "DINO_PCA_SIGMA",         10.0)
+#         self.border:         int   = getattr(config, "DINO_PCA_BORDER",        1)
+#         self.center_frac:    float = getattr(config, "DINO_PCA_CENTER_FRAC",   0.4)
+#
+#         # Lazily loaded in _ensure_model()
+#         self._processor: Optional[AutoImageProcessor] = None
+#         self._dino_model: Optional[Dinov2Model] = None
+#
+#     # ------------------------------------------------------------------
+#     # Model management
+#     # ------------------------------------------------------------------
+#
+#     def _ensure_model(self) -> None:
+#         """Load and cache the DINOv2 HuggingFace model (called once on first use)."""
+#         cache_key = "reg" if self.use_registers else "std"
+#         if cache_key not in _PCA_MODEL_CACHE:
+#             model_name = (
+#                 "facebook/dinov2-with-registers-small"
+#                 if self.use_registers
+#                 else "facebook/dinov2-base"
+#             )
+#             print(f"[Dinov2PcaGaussianMethod] Loading {model_name} on {DEVICE} …")
+#             processor = AutoImageProcessor.from_pretrained(model_name)
+#             model = Dinov2Model.from_pretrained(model_name).to(DEVICE)
+#             model.eval()
+#             _PCA_MODEL_CACHE[cache_key] = (processor, model)
+#
+#         self._processor, self._dino_model = _PCA_MODEL_CACHE[cache_key]
+#
+#     # ------------------------------------------------------------------
+#     # Internal: component selection (the robust inversion logic)
+#     # ------------------------------------------------------------------
+#
+#     @staticmethod
+#     def _border_mask(grid_h: int, grid_w: int, border: int) -> np.ndarray:
+#         """Boolean mask — True at border patches (likely background)."""
+#         m = np.zeros((grid_h, grid_w), dtype=bool)
+#         m[:border, :]  = True
+#         m[-border:, :] = True
+#         m[:, :border]  = True
+#         m[:, -border:] = True
+#         return m
+#
+#     @staticmethod
+#     def _center_mask(grid_h: int, grid_w: int, center_frac: float) -> np.ndarray:
+#         """Boolean mask — True for the central rectangle (likely object)."""
+#         m  = np.zeros((grid_h, grid_w), dtype=bool)
+#         h0 = max(int(grid_h * (0.5 - center_frac / 2)), 0)
+#         h1 = min(int(grid_h * (0.5 + center_frac / 2)), grid_h)
+#         w0 = max(int(grid_w * (0.5 - center_frac / 2)), 0)
+#         w1 = min(int(grid_w * (0.5 + center_frac / 2)), grid_w)
+#         m[h0:h1, w0:w1] = True
+#         return m
+#
+#     def _select_best_component(
+#         self,
+#         pca_features: np.ndarray,
+#         grid_h: int,
+#         grid_w: int,
+#     ) -> tuple[np.ndarray, int, float]:
+#         """
+#         Evaluate every component × polarity pair and return the one that best
+#         separates the image center from the image border.
+#
+#         Returns
+#         -------
+#         best_map   : (grid_h, grid_w) normalized foreground map in [0, 1]
+#         best_comp  : 0-based index of the winning PCA component
+#         best_score : center_mean - border_mean score of the winner
+#         """
+#         border_flat = self._border_mask(grid_h, grid_w, self.border).flatten()
+#         center_flat = self._center_mask(grid_h, grid_w, self.center_frac).flatten()
+#
+#         best_map:   Optional[np.ndarray] = None
+#         best_score: float = -np.inf
+#         best_comp:  int   = 0
+#
+#         n = min(self.n_components, pca_features.shape[1])
+#         for i in range(n):
+#             for sign in (+1.0, -1.0):
+#                 candidate = _normalize(sign * pca_features[:, i])
+#                 score = candidate[center_flat].mean() - candidate[border_flat].mean()
+#                 if score > best_score:
+#                     best_score = score
+#                     best_map   = candidate.reshape(grid_h, grid_w)
+#                     best_comp  = i
+#
+#         return best_map, best_comp, best_score  # type: ignore[return-value]
+#
+#     # ------------------------------------------------------------------
+#     # Internal: single-image heatmap
+#     # ------------------------------------------------------------------
+#
+#     def _heatmap_single(self, img_pil: Image.Image) -> np.ndarray:
+#         """Return a (H, W) soft heatmap in [0,1] for one PIL image."""
+#         inputs = self._processor(images=img_pil, return_tensors="pt").to(DEVICE)
+#
+#         h = inputs["pixel_values"].shape[2]
+#         w = inputs["pixel_values"].shape[3]
+#         grid_h = h // _PATCH_SIZE
+#         grid_w = w // _PATCH_SIZE
+#         num_patches = grid_h * grid_w
+#
+#         with torch.no_grad():
+#             outputs = self._dino_model(**inputs)
+#             seq_len = outputs.last_hidden_state.shape[1]
+#
+#             num_extra = seq_len - num_patches
+#             if num_extra < 0:
+#                 raise RuntimeError(
+#                     f"[Dinov2PcaGaussianMethod] Token count mismatch: "
+#                     f"seq_len={seq_len}, expected_patches={num_patches}"
+#                 )
+#             # Skip CLS + register tokens; keep only patch tokens
+#             features = outputs.last_hidden_state[:, num_extra:, :]
+#
+#         features_np = features.squeeze(0).cpu().numpy()  # (num_patches, hidden_dim)
+#
+#         pca = PCA(n_components=self.n_components)
+#         pca_features = pca.fit_transform(features_np)
+#
+#         pca_map, best_comp, score = self._select_best_component(
+#             pca_features, grid_h, grid_w
+#         )
+#         print(
+#             f"[Dinov2PcaGaussianMethod] PC{best_comp + 1} selected  "
+#             f"(center-border score={score:.4f})"
+#         )
+#
+#         # Binary foreground mask → resize to original image dimensions
+#         binary_mask = (pca_map > np.quantile(pca_map, self.threshold_q)).astype(float)
+#         W_orig, H_orig = img_pil.size                          # PIL: (W, H)
+#         binary_mask = cv2.resize(binary_mask, (W_orig, H_orig))
+#
+#         return _create_soft_heatmap(binary_mask, sigma=self.sigma)
+#
+#     # ------------------------------------------------------------------
+#     # Public interface
+#     # ------------------------------------------------------------------
+#
+#     def compute(
+#         self,
+#         model,                      # unused — DINOv2 is self-contained
+#         images: torch.Tensor,       # (B, C, H, W) ImageNet-normalized
+#         targets: torch.Tensor,      # (B,) — unused (unsupervised method)
+#     ) -> torch.Tensor:
+#         """
+#         Compute PCA-based Gaussian heatmaps for a batch of images.
+#
+#         Args:
+#             model:   Unused (required by AttributionMethod interface).
+#             images:  Batch tensor (B, C, H, W), ImageNet-normalized float32.
+#             targets: Target class indices (B,) — not used by this method.
+#
+#         Returns:
+#             Tensor of shape (B, H, W), dtype float32, values in [0, 1].
+#             The spatial dimensions match the input ``images``.
+#         """
+#         self._ensure_model()
+#
+#         B, C, H, W = images.shape
+#         pil_images = _tensor_batch_to_pil(images)
+#
+#         heatmaps = np.stack(
+#             [self._heatmap_single(pil_img) for pil_img in pil_images],
+#             axis=0,
+#         )  # (B, H_pil, W_pil)  — H_pil may differ from H if processor rescaled
+#
+#         # Resize to match the original tensor spatial dimensions if needed
+#         if heatmaps.shape[1] != H or heatmaps.shape[2] != W:
+#             heatmaps_t = torch.from_numpy(heatmaps).unsqueeze(1).float()  # (B,1,h,w)
+#             heatmaps_t = F.interpolate(
+#                 heatmaps_t, size=(H, W), mode="bilinear", align_corners=False
+#             )
+#             heatmaps = heatmaps_t.squeeze(1).numpy()                       # (B,H,W)
+#
+#         return torch.from_numpy(heatmaps).float()
+#
