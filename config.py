@@ -46,8 +46,8 @@ ANALYSIS_DIR = BASE_DIR / "results" / "analysis"
 MAX_WORKERS = 8  # Number of data loader workers
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 HEATMAP_BATCH_SIZE = 12
-PHASE2_BATCH_SIZE = 128  # Batch size for Phase 2 occlusion processing (GPU)
-PHASE2_SAVE_WORKERS = 4  # Number of workers for parallel image saving (CPU)
+PHASE2_BATCH_SIZE = 256  # Batch size for Phase 2 occlusion processing (GPU)
+PHASE2_SAVE_WORKERS = 8  # Number of workers for parallel image saving (CPU)
 PHASE3_BATCH_SIZE_PYTORCH = 512  # Batch size for Phase 3 PyTorch model evaluation (GPU) - increased for better GPU utilization
 PHASE3_BATCH_SIZE_LLM = 1  # Batch size for Phase 3 LLM model evaluation (CPU/API) - smaller batches = continuous processing, no gaps
 PHASE3_LOAD_WORKERS = 8  # Number of workers for parallel image loading in Phase 3
@@ -138,14 +138,16 @@ ATTRIBUTION_METHODS = [
     "grad_cam",
     "guided_gradcam",
     "random_baseline",
-    # "c3f",
-    # DINOv2-based custom methods
-    "dinov2_pca_gaussian",
-    "dinov2_attention",
+    # "c3f", #proffesor said we dont care about this anymore
     
     # new methods for proffesor
-    "sumDino",
-    "pca1",
+    "dinov2_pca_gaussian",
+    "dinov2_attention",
+    "dinov2_PC1",
+    "dinov2_PC_EV",
+    "dinov2_PC_L2",
+    "dinov2_COMBO_FIXED",
+    "dinov2_ENT",
 ]
 
 # Global switches for DINOv2 register usage in custom methods
