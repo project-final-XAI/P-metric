@@ -1,8 +1,10 @@
 """
 test_dino.py — Compare DINOv2 attribution methods side-by-side.
 
-Shows 5 columns per image:
-  Original | PCA-Gaussian | CLS-Attention | Fused (new) | Fused overlay
+Run-all view includes:
+  Original | PCA-Gaussian | CLS-Attention | sumDino | pca1 | Unified | Unified overlay
+
+All heatmaps are continuous (non-binary) displays.
 """
 
 import os
@@ -20,7 +22,12 @@ from gussian import Dinov2UnifiedMethod
 # ── original individual methods ──────────────────────────────────────────────
 # Adjust the import paths if your project layout differs.
 try:
-    from attribution.dinov2_methods import Dinov2PcaGaussianMethod, Dinov2AttentionMethod
+    from attribution.dinov2_methods import (
+        Dinov2PcaGaussianMethod,
+        Dinov2AttentionMethod,
+        SumDinoMethod,
+        Dinov2Pca1Method,
+    )
     _HAVE_OLD_METHODS = True
 except ImportError:
     print(
@@ -79,6 +86,8 @@ def generate_comparison(base_path: str, n_images: int = 2) -> None:
     if _HAVE_OLD_METHODS:
         pca_method  = Dinov2PcaGaussianMethod()
         attn_method = Dinov2AttentionMethod()
+        sum_method  = SumDinoMethod()
+        pca1_method = Dinov2Pca1Method()
 
     for idx in range(n_images):
         print(f"\n── Image {idx + 1}/{n_images} ──────────────────────────────────")
@@ -94,12 +103,16 @@ def generate_comparison(base_path: str, n_images: int = 2) -> None:
         print(f"[fused]   computing for: {img_name}")
         fused_heatmap = fused_method.compute(None, img_tensor, None)[0].cpu().numpy()
 
-        pca_heatmap = attn_heatmap = None
+        pca_heatmap = attn_heatmap = sum_heatmap = pca1_heatmap = None
         if _HAVE_OLD_METHODS:
             print(f"[pca]     computing for: {img_name}")
             pca_heatmap  = pca_method.compute(None, img_tensor, None)[0].cpu().numpy()
             print(f"[attn]    computing for: {img_name}")
             attn_heatmap = attn_method.compute(None, img_tensor, None)[0].cpu().numpy()
+            print(f"[sumDino] computing for: {img_name}")
+            sum_heatmap  = sum_method.compute(None, img_tensor, None)[0].cpu().numpy()
+            print(f"[pca1]    computing for: {img_name}")
+            pca1_heatmap = pca1_method.compute(None, img_tensor, None)[0].cpu().numpy()
 
         # ── resize original to match heatmap spatial dims ───────────────────
         H, W    = fused_heatmap.shape
@@ -107,15 +120,17 @@ def generate_comparison(base_path: str, n_images: int = 2) -> None:
 
         # ── build figure ─────────────────────────────────────────────────────
         if _HAVE_OLD_METHODS:
-            ncols = 5
+            ncols = 7
             titles = [
                 f"Original\n{img_name}",
                 "PCA-Gaussian\n(old)",
                 "CLS-Attention\n(old)",
-                "Fused\n(new)",
-                "Fused Overlay\n(new)",
+                "sumDino\n(attn + pca)",
+                "pca1\n(PC1 only)",
+                "Unified\n(new)",
+                "Unified Overlay\n(new)",
             ]
-            maps = [None, pca_heatmap, attn_heatmap, fused_heatmap, fused_heatmap]
+            maps = [None, pca_heatmap, attn_heatmap, sum_heatmap, pca1_heatmap, fused_heatmap, fused_heatmap]
         else:
             ncols = 4
             titles = [
@@ -139,11 +154,11 @@ def generate_comparison(base_path: str, n_images: int = 2) -> None:
             elif col == ncols - 1:
                 # Overlay column
                 ax.imshow(img_np)
-                im = ax.imshow(hmap, cmap="jet", alpha=0.5)
+                im = ax.imshow(hmap, cmap="inferno", vmin=0.0, vmax=1.0, alpha=0.45, interpolation="bilinear")
                 fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
             else:
                 # Pure heatmap column
-                im = ax.imshow(hmap, cmap="jet")
+                im = ax.imshow(hmap, cmap="inferno", vmin=0.0, vmax=1.0)
                 fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
         plt.tight_layout()
@@ -153,5 +168,5 @@ def generate_comparison(base_path: str, n_images: int = 2) -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    imagenet_path = "../../data/imagenet"   # adjust if needed
+    imagenet_path = "../../data/imagenet"   # data/imagenet (repo-relative)
     generate_comparison(imagenet_path, n_images=2)

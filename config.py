@@ -96,7 +96,7 @@ DATASET_NAME = "imagenet"
 # Models used for generating attribution heatmaps (Phase 1)
 GENERATING_MODELS = [
     "resnet50",
-    # "mobilenet_v2",
+    "mobilenet_v2",
     "vgg16",
 
     # "vit_b_16",
@@ -109,7 +109,7 @@ GENERATING_MODELS = [
 # Models used for evaluating occluded images (Phase 2)
 JUDGING_MODELS = [
     "resnet50",
-    # "mobilenet_v2",
+    "mobilenet_v2",
     "vgg16",
 
     # "vit_b_16",
@@ -138,10 +138,14 @@ ATTRIBUTION_METHODS = [
     "grad_cam",
     "guided_gradcam",
     "random_baseline",
-    # "c3f", #the profesor said we dont care anymore
+    # "c3f",
     # DINOv2-based custom methods
     "dinov2_pca_gaussian",
     "dinov2_attention",
+    
+    # new methods for proffesor
+    "sumDino",
+    "pca1",
 ]
 
 # Global switches for DINOv2 register usage in custom methods

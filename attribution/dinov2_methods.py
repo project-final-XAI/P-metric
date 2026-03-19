@@ -4,7 +4,7 @@ DINOv2-based attribution methods.
 Provides two attribution methods that integrate the DINOv2 heatmaps into the
 standard Phase 1/2 pipeline:
 
-- Dinov2PcaGaussianMethod: PCA + Gaussian soft heatmap (from method_pca.py)
+- Dinov2PcaGaussianMethod: PCA + (non-Gaussian) soft heatmap (legacy name)
 - Dinov2AttentionMethod:   Self-attention heatmap  (from method_attention.py)
 
 Both methods decide whether to use DINOv2 register models based on config flags:
@@ -14,12 +14,11 @@ Both methods decide whether to use DINOv2 register models based on config flags:
 Additional PCA tuning knobs (all optional in config):
 - config.DINO_PCA_N_COMPONENTS  (int,   default 5)    – how many PCA components to evaluate
 - config.DINO_PCA_THRESHOLD_Q   (float, default 0.5)  – quantile for binary foreground mask
-- config.DINO_PCA_SIGMA         (float, default 10.0) – Gaussian blur strength
 - config.DINO_PCA_BORDER        (int,   default 1)    – border width (patches) for scoring
 - config.DINO_PCA_CENTER_FRAC   (float, default 0.4)  – center fraction for scoring
 
 Additional Attention tuning knobs:
-- config.DINO_ATTENTION_SMOOTH_SIGMA (float, default 0.0) – optional Gaussian smoothing
+- (Gaussian smoothing is intentionally disabled in this codebase.)
 """
 
 from __future__ import annotations
@@ -31,7 +30,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from scipy.ndimage import gaussian_filter
 from sklearn.decomposition import PCA
 from torchvision import transforms
 from transformers import AutoImageProcessor, Dinov2Model
@@ -70,27 +68,6 @@ def _normalize(arr: np.ndarray) -> np.ndarray:
     return (arr - mn) / (mx - mn + 1e-8)
 
 
-def _create_soft_heatmap(binary_mask: np.ndarray, sigma: float = 10.0) -> np.ndarray:
-    """
-    Turn a binary mask into a smooth XAI-style heatmap.
-
-    Pipeline:
-      1. Distance Transform  → high values at object center, zero at background
-      2. Gaussian blur       → smooth, natural-looking attribution blob
-      3. Normalize to [0, 1]
-
-    Using cv2.GaussianBlur (faster than scipy for 2-D arrays).
-    ksize=(0,0) lets OpenCV auto-compute kernel size from sigma.
-    """
-    mask_uint8 = (binary_mask * 255).astype(np.uint8)
-    dist = cv2.distanceTransform(mask_uint8, cv2.DIST_L2, 5)
-    heatmap = cv2.GaussianBlur(dist, ksize=(0, 0), sigmaX=sigma, sigmaY=sigma)
-    mx = heatmap.max()
-    if mx > 0:
-        heatmap = (heatmap - heatmap.min()) / (mx - heatmap.min() + 1e-8)
-    return heatmap
-
-
 def _tensor_batch_to_pil(images: torch.Tensor) -> list[Image.Image]:
     """
     Convert a (B, C, H, W) float tensor (ImageNet-normalized) back to PIL images.
@@ -119,7 +96,7 @@ _ATTN_MODEL_CACHE: dict[str, object] = {}  # key: "std" | "reg"  → torch.hub m
 
 class Dinov2PcaGaussianMethod(AttributionMethod):
     """
-    Attribution method using DINOv2 patch features + PCA + Gaussian soft heatmap.
+    Attribution method using DINOv2 patch features + PCA + soft heatmap.
 
     Pipeline per image
     ------------------
@@ -131,14 +108,13 @@ class Dinov2PcaGaussianMethod(AttributionMethod):
        the component whose high values cluster in the image center (object) and
        low values live at the border (background) wins.
     5. Threshold at ``threshold_q`` quantile → binary foreground mask.
-    6. Distance Transform + Gaussian blur → smooth soft heatmap.
+    6. Distance Transform → soft heatmap (no Gaussian smoothing).
 
     Configuration keys read from ``config``
     ----------------------------------------
     DINO_PCA_USE_REGISTERS  bool   True   – use facebook/dinov2-with-registers-small
     DINO_PCA_N_COMPONENTS   int    5      – PCA components to evaluate
     DINO_PCA_THRESHOLD_Q    float  0.5    – foreground quantile threshold
-    DINO_PCA_SIGMA          float  10.0   – Gaussian blur strength
     DINO_PCA_BORDER         int    1      – border-patch width for scoring
     DINO_PCA_CENTER_FRAC    float  0.4    – center-region fraction for scoring
     """
@@ -150,7 +126,6 @@ class Dinov2PcaGaussianMethod(AttributionMethod):
         self.use_registers:  bool  = getattr(config, "DINO_PCA_USE_REGISTERS", True)
         self.n_components:   int   = getattr(config, "DINO_PCA_N_COMPONENTS",  5)
         self.threshold_q:    float = getattr(config, "DINO_PCA_THRESHOLD_Q",   0.5)
-        self.sigma:          float = getattr(config, "DINO_PCA_SIGMA",         10.0)
         self.border:         int   = getattr(config, "DINO_PCA_BORDER",        1)
         self.center_frac:    float = getattr(config, "DINO_PCA_CENTER_FRAC",   0.4)
 
@@ -284,7 +259,7 @@ class Dinov2PcaGaussianMethod(AttributionMethod):
         W_orig, H_orig = img_pil.size                          # PIL: (W, H)
         binary_mask = cv2.resize(binary_mask, (W_orig, H_orig))
 
-        return _create_soft_heatmap(binary_mask, sigma=self.sigma)
+        return binary_mask
 
     # ------------------------------------------------------------------
     # Public interface
@@ -345,14 +320,11 @@ class Dinov2AttentionMethod(AttributionMethod):
     3. Average across all heads → CLS-token attention vector over all tokens.
     4. Discard non-patch tokens (CLS + registers); take the last num_patches
        entries and reshape to (grid_h, grid_w).
-    5. Optionally smooth with a Gaussian blur.
-    6. Resize to original image dimensions.
+    5. Resize to original image dimensions.
 
     Configuration keys read from ``config``
     ----------------------------------------
     DINO_ATTENTION_USE_REGISTERS  bool   True  – use dinov2_vits14_reg
-    DINO_ATTENTION_SMOOTH_SIGMA   float  0.0   – Gaussian blur on attention map
-                                                  (0 = off; try 2–4 for softer look)
     """
 
     # ImageNet normalization transform for the attention branch
@@ -366,7 +338,8 @@ class Dinov2AttentionMethod(AttributionMethod):
         super().__init__("dinov2_attention")
 
         self.use_registers:  bool  = getattr(config, "DINO_ATTENTION_USE_REGISTERS", True)
-        self.smooth_sigma:   float = getattr(config, "DINO_ATTENTION_SMOOTH_SIGMA",  0.0)
+        # Gaussian smoothing intentionally disabled for this project.
+        self.smooth_sigma: float = 0.0
 
         self._dino_model = None  # lazily loaded
 
@@ -455,11 +428,6 @@ class Dinov2AttentionMethod(AttributionMethod):
         attn_map   = patch_attn.reshape(grid_h, grid_w).cpu().numpy()
         attn_map   = _normalize(attn_map)
 
-        # Optional Gaussian smoothing for a softer, XAI-like appearance
-        if self.smooth_sigma > 0:
-            attn_map = gaussian_filter(attn_map, sigma=self.smooth_sigma)
-            attn_map = _normalize(attn_map)
-
         # Resize to original image spatial dimensions
         return cv2.resize(attn_map, (W_orig, H_orig))
 
@@ -504,3 +472,136 @@ class Dinov2AttentionMethod(AttributionMethod):
             heatmaps = heatmaps_t.squeeze(1).numpy()                       # (B,H,W)
 
         return torch.from_numpy(heatmaps).float()
+
+
+# ===========================================================================
+# Method 3 – PCA (1 component, no Gaussian)
+# ===========================================================================
+
+class Dinov2Pca1Method(AttributionMethod):
+    """
+    PCA attribution using **only the 1st PCA component**, producing a continuous
+    heatmap without thresholding or Gaussian blur.
+
+    Name: "pca1"
+    """
+
+    def __init__(self) -> None:
+        super().__init__("pca1")
+        self.use_registers: bool = getattr(config, "DINO_PCA_USE_REGISTERS", True)
+        self.center_frac: float = getattr(config, "DINO_PCA_CENTER_FRAC", 0.4)
+        self.border: int = getattr(config, "DINO_PCA_BORDER", 1)
+        self._processor: Optional[AutoImageProcessor] = None
+        self._dino_model: Optional[Dinov2Model] = None
+
+    def _ensure_model(self) -> None:
+        cache_key = "reg" if self.use_registers else "std"
+        if cache_key not in _PCA_MODEL_CACHE:
+            model_name = (
+                "facebook/dinov2-with-registers-small"
+                if self.use_registers
+                else "facebook/dinov2-base"
+            )
+            print(f"[Dinov2Pca1Method] Loading {model_name} on {DEVICE} …")
+            processor = AutoImageProcessor.from_pretrained(model_name)
+            model = Dinov2Model.from_pretrained(model_name).to(DEVICE)
+            model.eval()
+            _PCA_MODEL_CACHE[cache_key] = (processor, model)
+
+        self._processor, self._dino_model = _PCA_MODEL_CACHE[cache_key]
+
+    @staticmethod
+    def _border_mask(grid_h: int, grid_w: int, border: int) -> np.ndarray:
+        m = np.zeros((grid_h, grid_w), dtype=bool)
+        m[:border, :] = True
+        m[-border:, :] = True
+        m[:, :border] = True
+        m[:, -border:] = True
+        return m
+
+    @staticmethod
+    def _center_mask(grid_h: int, grid_w: int, center_frac: float) -> np.ndarray:
+        m = np.zeros((grid_h, grid_w), dtype=bool)
+        h0 = max(int(grid_h * (0.5 - center_frac / 2)), 0)
+        h1 = min(int(grid_h * (0.5 + center_frac / 2)), grid_h)
+        w0 = max(int(grid_w * (0.5 - center_frac / 2)), 0)
+        w1 = min(int(grid_w * (0.5 + center_frac / 2)), grid_w)
+        m[h0:h1, w0:w1] = True
+        return m
+
+    def _heatmap_single(self, img_pil: Image.Image) -> np.ndarray:
+        inputs = self._processor(images=img_pil, return_tensors="pt").to(DEVICE)
+
+        h = inputs["pixel_values"].shape[2]
+        w = inputs["pixel_values"].shape[3]
+        grid_h = h // _PATCH_SIZE
+        grid_w = w // _PATCH_SIZE
+        num_patches = grid_h * grid_w
+
+        with torch.no_grad():
+            outputs = self._dino_model(**inputs)
+            seq_len = outputs.last_hidden_state.shape[1]
+            num_extra = seq_len - num_patches
+            features = outputs.last_hidden_state[:, num_extra:, :]
+
+        features_np = features.squeeze(0).cpu().numpy()
+        pc1 = PCA(n_components=1).fit_transform(features_np)[:, 0]  # (num_patches,)
+
+        border_flat = self._border_mask(grid_h, grid_w, self.border).flatten()
+        center_flat = self._center_mask(grid_h, grid_w, self.center_frac).flatten()
+
+        pos = _normalize(pc1)
+        neg = _normalize(-pc1)
+        pos_score = pos[center_flat].mean() - pos[border_flat].mean()
+        neg_score = neg[center_flat].mean() - neg[border_flat].mean()
+        pc1_norm = pos if pos_score >= neg_score else neg
+
+        pca_map = pc1_norm.reshape(grid_h, grid_w)
+        W_orig, H_orig = img_pil.size
+        return cv2.resize(pca_map, (W_orig, H_orig))
+
+    def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        self._ensure_model()
+
+        B, C, H, W = images.shape
+        pil_images = _tensor_batch_to_pil(images)
+
+        heatmaps = np.stack([self._heatmap_single(p) for p in pil_images], axis=0)
+
+        if heatmaps.shape[1] != H or heatmaps.shape[2] != W:
+            heatmaps_t = torch.from_numpy(heatmaps).unsqueeze(1).float()
+            heatmaps_t = F.interpolate(heatmaps_t, size=(H, W), mode="bilinear", align_corners=False)
+            heatmaps = heatmaps_t.squeeze(1).numpy()
+
+        # Ensure [0,1] per sample (resize can introduce tiny out-of-range)
+        heatmaps = np.stack([_normalize(hm) for hm in heatmaps], axis=0)
+        return torch.from_numpy(heatmaps).float()
+
+
+# ===========================================================================
+# Method 4 – Sum(PCA-Gaussian + Attention)
+# ===========================================================================
+
+class SumDinoMethod(AttributionMethod):
+    """
+    Sum of Dinov2AttentionMethod and Dinov2PcaGaussianMethod.
+
+    Name: "sumDino"
+    """
+
+    def __init__(self) -> None:
+        super().__init__("sumDino")
+        self._pca = Dinov2PcaGaussianMethod()
+        self._attn = Dinov2AttentionMethod()
+        self.pca_weight = 0.5
+        self.attn_weight = 0.5
+
+    def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        pca = self._pca.compute(model, images, targets)
+        attn = self._attn.compute(model, images, targets)
+        summed = pca*self.pca_weight + attn*self.attn_weight
+        # Per-sample normalize to [0,1]
+        out = []
+        for i in range(summed.shape[0]):
+            out.append(self._normalize_attribution(summed[i : i + 1])[0])
+        return torch.stack(out, dim=0)
