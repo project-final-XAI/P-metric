@@ -760,10 +760,11 @@ class Dinov2ComboEntSmoothMethod(Dinov2AllMethodsBase):
                                       (1.0 = fully gated, 0.0 = no gate).
     """
 
-    #     def __init__(self, sigma: float = 1.0, gamma: float = 2.5, alpha: float = 0.85) -> None: OLD -> worked well (2)
-    # def __init__(self, sigma: float = 1.0, gamma: float = 1.0, alpha: float = 0.7) -> None: OLD-> so minor on the previous (3)
-    # def __init__(self, sigma: float = 1.3, gamma: float = .9, alpha: float = 0.6) -> None: OLD -> worked best so far (1)
-    def __init__(self, sigma: float = 1.3, gamma: float = .9, alpha: float = 0.6) -> None:
+    # def __init__(self, sigma: float = 1.0, gamma: float = 1.0, alpha: float = 0.7) -> None: OLD-> so minor on the previous (4)
+    # def __init__(self, sigma: float = 1.0, gamma: float = 2.5, alpha: float = 0.85) -> None: OLD -> worked well (3)
+    # def __init__(self, sigma: float = 1.3, gamma: float = .9, alpha: float = 0.6) -> None: OLD -> worked best so far (2)
+    # def __init__(self, sigma: float = 1.6, gamma: float = .8, alpha: float = 0.55) -> None: OLD -> worked even better (1)
+    def __init__(self, sigma: float = 1.6, gamma: float = .8, alpha: float = 0.55) -> None:
         super().__init__("dinov2_combo_ent_smooth")
         self.sigma = sigma
         self.gamma = gamma
