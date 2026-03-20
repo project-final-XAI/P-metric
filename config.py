@@ -87,36 +87,36 @@ DATASET_CONFIG = {
 }
 
 # Current dataset to use
-DATASET_NAME = "imagenet"
-# DATASET_NAME = "SIPaKMeD_cropped"
+# DATASET_NAME = "imagenet"
+DATASET_NAME = "SIPaKMeD_cropped"
 
 # -----------------
 # Model Configuration
 # -----------------
 # Models used for generating attribution heatmaps (Phase 1)
 GENERATING_MODELS = [
-    "resnet50",
-    "mobilenet_v2",
-    "vgg16",
+    # "resnet50",
+    # "mobilenet_v2",
+    # "vgg16",
 
     # "vit_b_16",
     # "swin_t",
 
-    # "sipakmed_cropped_efficientnet.pth",
-    # "sipakmed_cropped_ResNet50.pth",
+    "sipakmed_cropped_efficientnet.pth",
+    "sipakmed_cropped_ResNet50.pth",
 ]
 
 # Models used for evaluating occluded images (Phase 2)
 JUDGING_MODELS = [
-    "resnet50",
-    "mobilenet_v2",
-    "vgg16",
+    # "resnet50",
+    # "mobilenet_v2",
+    # "vgg16",
 
     # "vit_b_16",
     # "swin_t",
 
-    # "sipakmed_cropped_efficientnet.pth",
-    # "sipakmed_cropped_ResNet50.pth",
+    "sipakmed_cropped_efficientnet.pth",
+    "sipakmed_cropped_ResNet50.pth",
 
     # "llama3.2-vision-binary",
     # "llama3.2-vision-cosine",
