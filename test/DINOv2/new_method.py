@@ -328,3 +328,188 @@ class Dinov2UnifiedMethod(Dinov2AttributionBase):
         # Hybrid Mode
         fused = _normalize(pca_soft * attn_full)
         return fused ** self.gamma if self.gamma != 1.0 else fused
+
+
+
+# ===========================================================================
+# Method 7 – COMBO_ENT_SMOOTH  (standalone, Gaussian-style PC selection)
+# ===========================================================================
+
+class Dinov2ComboEntSmoothMethod1(Dinov2AttributionBase):
+    """Entropy-weighted attn + Gaussian-style PC selection, with smoothing and gate.
+
+    Fully standalone — inherits from Dinov2AttributionBase (DinoContext /
+    Dinov2Extractor backend) and does NOT depend on Dinov2AllMethodsBase or
+    any of its helpers (_pca_soft_base, _forward_once, _scores_*, etc.).
+
+    PCA component selection
+    -----------------------
+    Uses the same center-vs-border contrast heuristic as Dinov2PcaGaussianMethod
+    (document 1): for each of the first ``n_components`` PCs × both polarities,
+    score = center_mean(normalized_candidate) − border_mean(normalized_candidate).
+    The highest-scoring (component, sign) pair wins.  No IoU, no CLS cosine
+    polarity correction — this is intentional: the Gaussian method's simpler
+    heuristic was empirically better on the target images (see result image).
+
+    Pipeline (all at patch-grid resolution until final upsample)
+    ------------------------------------------------------------
+    1. PCA → center-border selection → soft PC1 map  [0, 1]
+    2. Entropy-weighted blend of (head-avg attention) and (soft PC1)
+    3. Gaussian smooth (sigma in patch units) → re-normalize
+    4. PC1 gate:  smoothed × (pc1 ** gamma)
+    5. Alpha blend:  alpha * gated + (1 - alpha) * smoothed
+    6. Bilinear upsample to original image size
+
+    Hyperparameters
+    ---------------
+    n_components  int    5      Number of PCs to evaluate for selection.
+    border        int    1      Border ring width (patches) for scoring.
+    center_frac   float  0.4    Central fraction of grid for scoring.
+    sigma         float  2.0    Gaussian std-dev in patch units (0 = off).
+    gamma         float  0.7    PC1 gate exponent.
+    alpha         float  0.45   Weight of gated map in final blend.
+    """
+
+    def __init__(
+        self,
+        n_components: int   = 5,
+        border: int         = 1,
+        center_frac: float  = 0.4,
+        sigma: float        = 2.0,
+        gamma: float        = 0.7,
+        alpha: float        = 0.45,
+    ) -> None:
+        super().__init__("dinov2_combo_ent_smooth")
+        self.n_components = n_components
+        self.border       = border
+        self.center_frac  = center_frac
+        self.sigma        = sigma
+        self.gamma        = gamma
+        self.alpha        = alpha
+
+    # ------------------------------------------------------------------
+    # Step 1 — Gaussian-style center-border PC selection
+    # ------------------------------------------------------------------
+
+    def _select_pc_center_border(self, ctx: DinoContext) -> np.ndarray:
+        """Return the best soft PC map using center-vs-border contrast scoring.
+
+        Mirrors Dinov2PcaGaussianMethod._heatmap_single's selection loop
+        exactly, but returns the raw normalized continuous map instead of
+        binarizing + distance-transforming it.  No CLS polarity correction —
+        the center-border sign already handles polarity for centered subjects.
+
+        Args:
+            ctx: DinoContext from Dinov2Extractor.forward().
+
+        Returns:
+            (grid_h * grid_w,) float32 in [0, 1].
+        """
+        n = min(self.n_components, ctx.patch_features.shape[1])
+        pca_feat = PCA(n_components=n).fit_transform(ctx.patch_features)
+
+        bf = _border_mask(ctx.grid_h, ctx.grid_w, self.border).flatten()
+        cf = _center_mask(ctx.grid_h, ctx.grid_w, self.center_frac).flatten()
+
+        best_map, best_score = None, -np.inf
+
+        for i in range(n):
+            for sign in (+1.0, -1.0):
+                cand = _normalize(sign * pca_feat[:, i])   # (N,) in [0,1]
+                score = cand[cf].mean() - cand[bf].mean()
+                if score > best_score:
+                    best_score = score
+                    best_map   = cand                       # already (N,) flat
+
+        return best_map.astype(np.float32)                  # (N,) in [0, 1]
+
+    # ------------------------------------------------------------------
+    # Step 2 — Head-averaged attention map from DinoContext
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_attention(ctx: DinoContext) -> np.ndarray:
+        """Return (N,) float32 head-averaged CLS→patch attention in [0, 1].
+
+        Uses ctx.last_attention shape (num_heads, seq_len, seq_len).
+        CLS is index 0; patch tokens start at ctx.num_skip.
+        """
+        # Average over heads, take CLS row, skip non-patch prefix tokens
+        patch_attn = ctx.last_attention[:, 0, ctx.num_skip:].mean(axis=0)  # (N,)
+        lo, hi = patch_attn.min(), patch_attn.max()
+        return ((patch_attn - lo) / (hi - lo + 1e-8)).astype(np.float32)
+
+    # ------------------------------------------------------------------
+    # Entropy helpers (self-contained, no import from Dinov2AllMethodsBase)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _map_entropy(scores: np.ndarray) -> float:
+        """Normalized Shannon entropy of a [0,1] score array → float in [0,1]."""
+        N = len(scores)
+        p = scores.astype(np.float64) + 1e-10
+        p = p / p.sum()
+        return float(np.clip(-np.sum(p * np.log(p)) / np.log(N), 0.0, 1.0))
+
+    def _entropy_blend(self, attn: np.ndarray, pc1: np.ndarray) -> np.ndarray:
+        """Entropy-adaptive blend: weight each map by (1 - its entropy)."""
+        w_a = 1.0 - self._map_entropy(attn)
+        w_p = 1.0 - self._map_entropy(pc1)
+        denom = w_a + w_p
+        if denom < 1e-8:
+            w_a, w_p = 0.5, 0.5
+        else:
+            w_a, w_p = w_a / denom, w_p / denom
+        return (w_a * attn + w_p * pc1).astype(np.float32)
+
+    # ------------------------------------------------------------------
+    # Full pipeline — called by Dinov2AttributionBase.compute()
+    # ------------------------------------------------------------------
+
+    def _heatmap_single(self, ctx: DinoContext) -> np.ndarray:
+        import math
+
+        grid_h, grid_w = ctx.grid_h, ctx.grid_w
+
+        # 1. Gaussian-style PC selection (center-border, no CLS correction)
+        pc1  = self._select_pc_center_border(ctx)           # (N,) [0,1]
+
+        # 2. Head-averaged attention
+        attn = self._extract_attention(ctx)                  # (N,) [0,1]
+
+        # 3. Entropy-weighted blend
+        base = self._entropy_blend(attn, pc1)               # (N,) [0,1]
+
+        # 4. Gaussian smoothing on patch grid (torch conv for consistency)
+        hm = torch.from_numpy(base).float().reshape(1, 1, grid_h, grid_w).to(DEVICE)
+
+        if self.sigma > 0:
+            half   = math.ceil(3.0 * self.sigma)
+            ksize  = 2 * half + 1
+            coords = torch.arange(ksize, dtype=torch.float32, device=DEVICE) - half
+            g      = torch.exp(-(coords ** 2) / (2.0 * self.sigma ** 2))
+            g      = g / g.sum()
+            kernel = torch.outer(g, g).view(1, 1, ksize, ksize)
+            hm = F.conv2d(hm, kernel, padding=half)
+
+        # Re-normalize after smoothing
+        lo, hi = hm.min(), hm.max()
+        hm = (hm - lo) / (hi - lo + 1e-8) if (hi - lo).abs() > 1e-8 \
+             else torch.zeros_like(hm)
+
+        # 5. PC1 gate: suppress low-object-likeness patches
+        pc1_t = torch.from_numpy(pc1).float().reshape(1, 1, grid_h, grid_w).to(DEVICE)
+        gated = hm * (pc1_t ** self.gamma)
+
+        # 6. Alpha blend: gated vs smoothed (avoids over-suppressing thin parts)
+        hm = self.alpha * gated + (1.0 - self.alpha) * hm
+
+        # 7. Back to numpy, re-normalize, upsample to original image size
+        out = hm.squeeze().cpu().numpy().astype(np.float32)
+        lo, hi = out.min(), out.max()
+        if hi - lo > 1e-8:
+            out = (out - lo) / (hi - lo)
+
+        # Dinov2AttributionBase.compute() handles the final resize to
+        # (ctx.orig_h, ctx.orig_w) — return patch-grid shape here
+        return out   # (grid_h, grid_w)
