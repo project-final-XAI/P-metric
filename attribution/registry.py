@@ -46,7 +46,7 @@ from attribution.model_independent.unet_based import U2NetSaliencyMethod
 from attribution.model_independent.unet_dino import U2NetDinoFusionMethod
 
 # --- Category 3: Continuous wrappers ---------------------------------------
-from attribution.continuous import ContinuousWrapper
+from attribution.continuous import ContinuousWrapper, U2NetUnderlayFillWrapper
 
 
 # ---------------------------------------------------------------------------
@@ -80,8 +80,30 @@ METHOD_REGISTRY = {
     "u2net_dino_fusion": U2NetDinoFusionMethod(),
 
     # --- Continuous wrappers -----------------------------------------------
+    "saliency_continuous": ContinuousWrapper(SaliencyMethod(), sigma=2.0),
+    "inputxgradient_continuous": ContinuousWrapper(InputXGradientMethod(), sigma=2.0),
+    "guided_backprop_continuous": ContinuousWrapper(GuidedBackpropMethod(), sigma=2.0),
     "integrated_gradients_continuous": ContinuousWrapper(IntegratedGradientsMethod(), sigma=2.0),
     "gradientshap_continuous": ContinuousWrapper(GradientSHAPMethod(), sigma=2.0),
+    "occlusion_continuous": ContinuousWrapper(OcclusionMethod(), sigma=2.0),
+    "xrai_continuous": ContinuousWrapper(XRAIMethod(), sigma=2.0),
+    "grad_cam_continuous": ContinuousWrapper(GradCAMMethod(), sigma=2.0),
+    "guided_gradcam_continuous": ContinuousWrapper(GuidedGradCAMMethod(), sigma=2.0),
+    "random_baseline_continuous": ContinuousWrapper(RandomBaselineMethod(), sigma=2.0),
+    "u2net_saliency_continuous": ContinuousWrapper(U2NetSaliencyMethod(), sigma=2.0),
+    "u2net_dino_fusion_continuous": ContinuousWrapper(U2NetDinoFusionMethod(), sigma=2.0),
+
+    # --- U2Net underlay + XAI fill -----------------------------------------
+    "saliency_u2net_fill": U2NetUnderlayFillWrapper(SaliencyMethod()),
+    "inputxgradient_u2net_fill": U2NetUnderlayFillWrapper(InputXGradientMethod()),
+    "guided_backprop_u2net_fill": U2NetUnderlayFillWrapper(GuidedBackpropMethod()),
+    "integrated_gradients_u2net_fill": U2NetUnderlayFillWrapper(IntegratedGradientsMethod()),
+    "gradientshap_u2net_fill": U2NetUnderlayFillWrapper(GradientSHAPMethod()),
+    "occlusion_u2net_fill": U2NetUnderlayFillWrapper(OcclusionMethod()),
+    "xrai_u2net_fill": U2NetUnderlayFillWrapper(XRAIMethod()),
+    "grad_cam_u2net_fill": U2NetUnderlayFillWrapper(GradCAMMethod()),
+    "guided_gradcam_u2net_fill": U2NetUnderlayFillWrapper(GuidedGradCAMMethod()),
+    "random_baseline_u2net_fill": U2NetUnderlayFillWrapper(RandomBaselineMethod()),
 }
 
 

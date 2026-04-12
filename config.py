@@ -153,8 +153,30 @@ ATTRIBUTION_METHODS = [
     "u2net_dino_fusion",
 
     # --- Continuous wrappers ---
+    # "saliency_continuous",
+    # "inputxgradient_continuous",
+    # "guided_backprop_continuous",
     # "integrated_gradients_continuous",
     # "gradientshap_continuous",
+    # "occlusion_continuous",
+    # "xrai_continuous",
+    # "grad_cam_continuous",
+    # "guided_gradcam_continuous",
+    # "random_baseline_continuous",
+    # "u2net_saliency_continuous",
+    # "u2net_dino_fusion_continuous",
+
+    # --- U2Net underlay + XAI fill ---
+    # "saliency_u2net_fill",
+    # "inputxgradient_u2net_fill",
+    # "guided_backprop_u2net_fill",
+    # "integrated_gradients_u2net_fill",
+    # "gradientshap_u2net_fill",
+    # "occlusion_u2net_fill",
+    # "xrai_u2net_fill",
+    # "grad_cam_u2net_fill",
+    # "guided_gradcam_u2net_fill",
+    # "random_baseline_u2net_fill",
 ]
 
 # -----------------
