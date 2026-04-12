@@ -1,6 +1,9 @@
+"""
+Fusion method: U2Net saliency + DINOv2 CLS-patch cosine with 50/50 blend.
+"""
+
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 try:
@@ -9,28 +12,31 @@ except ImportError as exc:
     raise ImportError("Please install transformers: pip install transformers") from exc
 
 import config
-from attribution.base import AttributionMethod
-from attribution.unet_based import U2NetSaliencyMethod
+from attribution.base import ModelIndependentMethod
+from attribution._shared import DEVICE, get_cached_model
+from attribution.model_independent.unet_based import U2NetSaliencyMethod
 
-
-DEVICE = torch.device(
-    config.DEVICE if hasattr(config, "DEVICE") else ("cuda" if torch.cuda.is_available() else "cpu")
-)
-
-_MODEL_CACHE: dict[str, nn.Module] = {}
-DINO_MODEL_NAME = "facebook/dinov2-with-registers-base"
+DINO_MODEL_NAME = getattr(config, "DINO_MODEL_NAME", "facebook/dinov2-with-registers-base")
 _DINO_INPUT_SIZE = (224, 224)
 
 
-def _ensure_dinov2():
-    if "dinov2" not in _MODEL_CACHE:
+def _ensure_dinov2_hf():
+    def _load():
         model = AutoModel.from_pretrained(DINO_MODEL_NAME)
+        expected_regs = getattr(config, "DINO_NUM_REGISTERS", 4)
+        actual_regs = getattr(model.config, "num_register_tokens", expected_regs)
+        if actual_regs != expected_regs:
+            raise ValueError(
+                f"DINO register count mismatch: config={expected_regs}, model={actual_regs}. "
+                "Update DINO_NUM_REGISTERS or DINO_MODEL_NAME in config.py."
+            )
         model.to(DEVICE).eval()
-        _MODEL_CACHE["dinov2"] = model
-    return _MODEL_CACHE["dinov2"]
+        return model
+
+    return get_cached_model("dinov2_hf", _load)
 
 
-class U2NetDinoFusionMethod(AttributionMethod):
+class U2NetDinoFusionMethod(ModelIndependentMethod):
     """Fuses U2Net saliency and DINO maps with fixed 50/50 weights."""
 
     def __init__(self, method_name: str = "u2net_dino_fusion") -> None:
@@ -40,7 +46,7 @@ class U2NetDinoFusionMethod(AttributionMethod):
 
     def _get_dinov2(self):
         if self._dinov2 is None:
-            self._dinov2 = _ensure_dinov2()
+            self._dinov2 = _ensure_dinov2_hf()
         return self._dinov2
 
     def _detect_polarity_batch(self, batch_maps: torch.Tensor) -> torch.Tensor:
@@ -55,10 +61,6 @@ class U2NetDinoFusionMethod(AttributionMethod):
         flip_mask = (edge > center).float().view(B, 1, 1)
         return (1.0 - flip_mask) * batch_maps + flip_mask * (1.0 - batch_maps)
 
-    def _compute_u2_map(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """Use the existing U2Net attribution method implementation."""
-        return self._u2net.compute(model, images, targets)
-
     def _compute_dino_map(self, images: torch.Tensor, height: int, width: int) -> torch.Tensor:
         """Compute DINO CLS-vs-patch cosine heatmap with polarity correction."""
         img_dino = F.interpolate(images, size=_DINO_INPUT_SIZE, mode="bilinear")
@@ -66,7 +68,7 @@ class U2NetDinoFusionMethod(AttributionMethod):
         with torch.no_grad():
             outputs = dino(img_dino)
             last_hidden = outputs.last_hidden_state
-            num_regs = getattr(dino.config, "num_register_tokens", 0)
+            num_regs = getattr(config, "DINO_NUM_REGISTERS", 4)
             cls_token = F.normalize(last_hidden[:, 0:1, :], dim=-1)
             patch_tokens = F.normalize(last_hidden[:, 1 + num_regs :, :], dim=-1)
             sims = (patch_tokens * cls_token).sum(dim=-1)
@@ -75,9 +77,9 @@ class U2NetDinoFusionMethod(AttributionMethod):
             dino_map = F.interpolate(dino_map.unsqueeze(1), size=(height, width), mode="bilinear").squeeze(1)
             return self._detect_polarity_batch(dino_map)
 
-    def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def compute_independent(self, images: torch.Tensor) -> torch.Tensor:
         _, _, height, width = images.shape
-        u2_map = self._compute_u2_map(model, images, targets)
+        u2_map = self._u2net.compute_independent(images)
         dino_map = self._compute_dino_map(images, height, width)
         fused = 0.5 * u2_map + 0.5 * dino_map
         return self._normalize_attribution(fused)

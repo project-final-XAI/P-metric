@@ -1,62 +1,28 @@
 """
-DINOv2-based attribution methods — unified 6-method suite.
+DINOv2-based attribution methods — unified 7-method suite.
+
+All methods use ``facebook/dinov2-with-registers-base`` (ViT-B/14, registers
+enabled) loaded via HuggingFace ``transformers``.  The model is cached and
+shared across all DINO methods and the U2Net+DINO fusion.
 
 Architecture
 ------------
-All six methods share a single forward pass through DINOv2.  The shared
+All methods share a single forward pass through DINOv2.  The shared
 base is the **soft PCA map**: the best-scoring principal component (among
 the first ``DINO_PCA_N_COMPONENTS``, default 3) selected by center-vs-border
 contrast scoring, normalized to [0, 1] with NO binarization and NO Gaussian
-blur.  This raw continuous map is then used as the PC1 signal by every
-method that needs it, avoiding redundant model calls.
-
-    ┌─────────────────────────────────────────────────────────────────────┐
-    │ Step 0  One DINOv2 forward pass → patch_tokens [N,D], cls [D],     │
-    │          attention [heads, N]                                        │
-    │ Step 1  PCA(n_components) → select best component by center-border  │
-    │          scoring → soft [0,1] map  (shared base for all methods)    │
-    │                                                                      │
-    │  Method              PC base?  Attn?  Extra blend logic             │
-    │  ──────────────────  ────────  ─────  ─────────────────────────     │
-    │  1. DINO_ATTN        –         ✓      head-averaged CLS attention    │
-    │  2. DINO_PC1         ✓         –      soft PC1 only                  │
-    │  3. DINO_PC_EV       ✓         –      PC1+PC2+PC3 × explained var    │
-    │  4. DINO_PC_L2       ✓         –      L2 norm of PC1+PC2+PC3         │
-    │  5. COMBO_FIXED      ✓         ✓      0.5 × attn + 0.5 × PC1         │
-    │  6. COMBO_ENT        ✓         ✓      entropy-adaptive attn + PC1    │
-    └─────────────────────────────────────────────────────────────────────┘
-
-Polarity correction
--------------------
-For all PCA-based methods, the sign of each component is determined by
-Pearson correlation with per-patch cosine similarity to the CLS token.
-The CLS token is DINOv2's global image summary; patches most similar to it
-are empirically the foreground regions.  A negative correlation means the
-component is pointing "away" from foreground — it is flipped.  This works
-for any foreground-to-background area ratio (close-ups, medical images, etc.)
-and replaces the old center-vs-border polarity heuristic used for sign only
-(center-vs-border is still used for *component selection*, not sign).
-
-Why no binarization?
---------------------
-The normalized PCA component values already form a continuous [0, 1]
-importance map.  Applying a hard quantile threshold would collapse the
-natural gradations between "strongly foreground" and "weakly foreground"
-patches.  The soft map is passed directly into each method's blending logic.
+blur.
 
 Configuration flags (all optional, read from ``config`` module)
 ---------------------------------------------------------------
-  DINO_PCA_USE_REGISTERS   bool   True   – use dinov2_vits14_reg
   DINO_PCA_N_COMPONENTS    int    3      – components to evaluate for selection
   DINO_PCA_BORDER          int    1      – border ring width for scoring
   DINO_PCA_CENTER_FRAC     float  0.4    – center fraction for scoring
-  DEVICE                   str           – torch device (auto-detected if absent)
 """
 
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 import numpy as np
 import torch
@@ -65,55 +31,46 @@ from PIL import Image
 from sklearn.decomposition import PCA
 from torchvision import transforms
 
+try:
+    from transformers import AutoModel
+except ImportError as exc:
+    raise ImportError("Please install transformers: pip install transformers") from exc
+
 import config
-from attribution.base import AttributionMethod
+from attribution.base import ModelIndependentMethod
+from attribution._shared import DEVICE, get_cached_model
 
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-DEVICE = torch.device(
-    config.DEVICE
-    if hasattr(config, "DEVICE")
-    else ("cuda" if torch.cuda.is_available() else "cpu")
-)
-
+_DINO_MODEL_NAME = getattr(config, "DINO_MODEL_NAME", "facebook/dinov2-with-registers-base")
 _PATCH_SIZE = 14
 _ATTN_IMAGE_SIZE = (518, 518)   # 518 = 14 × 37 — optimal for DINOv2 patch grid
 _IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _IMAGENET_STD  = (0.229, 0.224, 0.225)
-
-# One cache per model variant so both can coexist in the same process
-_MODEL_CACHE: dict[str, object] = {}   # "std" | "reg" → torch.hub model
 
 
 # ---------------------------------------------------------------------------
 # Model loading
 # ---------------------------------------------------------------------------
 
-def _ensure_model(use_registers: bool):
-    """Load and cache the torch.hub DINOv2 model (called once on first use).
-
-    Uses the torch.hub API (facebookresearch/dinov2) which exposes both
-    ``forward_features`` and ``get_last_selfattention`` — required by all
-    six methods.
-
-    Args:
-        use_registers: If True load ``dinov2_vits14_reg`` (4 register tokens),
-                       otherwise ``dinov2_vits14``.
-
-    Returns:
-        The cached, eval-mode DINOv2 model on DEVICE.
-    """
-    key = "reg" if use_registers else "std"
-    if key not in _MODEL_CACHE:
-        name = "dinov2_vits14_reg" if use_registers else "dinov2_vits14"
-        print(f"[Dinov2Methods] Loading {name} on {DEVICE} …")
-        m = torch.hub.load("facebookresearch/dinov2", name, verbose=False)
+def _ensure_model():
+    """Load and cache the HuggingFace DINOv2-base model with registers."""
+    def _load():
+        m = AutoModel.from_pretrained(_DINO_MODEL_NAME)
+        expected_regs = getattr(config, "DINO_NUM_REGISTERS", 4)
+        actual_regs = getattr(m.config, "num_register_tokens", expected_regs)
+        if actual_regs != expected_regs:
+            raise ValueError(
+                f"DINO register count mismatch: config={expected_regs}, model={actual_regs}. "
+                "Update DINO_NUM_REGISTERS or DINO_MODEL_NAME in config.py."
+            )
         m.to(DEVICE).eval()
-        _MODEL_CACHE[key] = m
-    return _MODEL_CACHE[key]
+        return m
+
+    return get_cached_model("dinov2_hf", _load)
 
 
 # ---------------------------------------------------------------------------
@@ -147,68 +104,37 @@ def _tensor_to_pil(images: torch.Tensor) -> list[Image.Image]:
 
 
 # ---------------------------------------------------------------------------
-# Shared forward pass — extracts everything needed by all 6 methods at once
+# Shared forward pass — extracts everything needed by all 7 methods at once
 # ---------------------------------------------------------------------------
 
 def _forward_once(model, img_pil: Image.Image) -> dict:
     """Run one DINOv2 forward pass and return all signals needed by all methods.
 
-    Uses a forward hook on the last block's QKV projection to extract the
-    self-attention matrix, bypassing the lack of `get_last_selfattention` in DINOv2.
+    Uses the HuggingFace ``output_attentions=True`` flag to extract the last
+    layer's self-attention matrix directly — no QKV hook needed.
+
+    Token layout for HF DINOv2 with registers:
+        [CLS, reg_1, …, reg_R, patch_1, …, patch_N]
     """
     img_t = _transform(img_pil).unsqueeze(0).to(DEVICE)  # (1, C, 518, 518)
     grid_h = img_t.shape[2] // _PATCH_SIZE
     grid_w = img_t.shape[3] // _PATCH_SIZE
     N = grid_h * grid_w
 
-    # 1. Register a hook to intercept the QKV output of the very last block
-    saved_qkv = []
-
-    def qkv_hook(_module, _input, output):
-        saved_qkv.append(output.detach())
-
-    last_block = model.blocks[-1]
-    handle = last_block.attn.qkv.register_forward_hook(qkv_hook)
-
     with torch.no_grad():
-        # --- patch tokens + CLS -------------------------------------------
-        out = model.forward_features(img_t)
+        outputs = model(img_t, output_attentions=True)
 
-    # Remove the hook immediately after the forward pass so it doesn't linger
-    handle.remove()
+    hidden = outputs.last_hidden_state[0].float()          # (T, D)
+    num_regs = getattr(config, "DINO_NUM_REGISTERS", 4)
+    n_prefix = 1 + num_regs                                 # CLS + registers
 
-    # 2. Parse the token outputs
-    if isinstance(out, dict) and "x_norm_patchtokens" in out:
-        patch_tokens = out["x_norm_patchtokens"][0].float()  # (N, D)
-        cls_token = out["x_norm_clstoken"][0].float().squeeze(0)  # (D,)
-    else:
-        # Fallback: raw tensor [1, T, D] — skip non-patch prefix tokens
-        all_tok = (out[0] if torch.is_tensor(out) else out["x_prenorm"][0]).float()
-        n_prefix = all_tok.shape[0] - N
-        patch_tokens = all_tok[n_prefix:]
-        cls_token = all_tok[0]
+    cls_token    = hidden[0]                                 # (D,)
+    patch_tokens = hidden[n_prefix : n_prefix + N]           # (N, D)
 
-    # 3. Manually compute the attention matrix from the intercepted QKV
-    qkv = saved_qkv[0]  # Shape: (1, T, 3 * D)
-    B, T, three_D = qkv.shape
-    D = three_D // 3
-    num_heads = last_block.attn.num_heads
+    # Last layer's attention: (num_heads, T, T)
+    attn_last = outputs.attentions[-1][0].float()            # (H, T, T)
+    attn_raw  = attn_last[:, 0, -N:].mean(dim=0)            # (N,) CLS→patches
 
-    # Reshape and split into Q, K, V: (1, num_heads, T, head_dim)
-    qkv = qkv.reshape(B, T, 3, num_heads, D // num_heads).permute(2, 0, 3, 1, 4)
-    q, k, v = qkv[0], qkv[1], qkv[2]
-
-    # Compute attention scores: Softmax((Q * scale) @ K^T)
-    scale = (D // num_heads) ** -0.5
-    q = q * scale
-    attn_matrix = q @ k.transpose(-2, -1)  # (1, num_heads, T, T)
-    attn_matrix = attn_matrix.softmax(dim=-1)
-
-    # Extract the CLS-to-patch attention
-    # CLS token is at index 0. Patch tokens are the last N tokens.
-    attn_raw = attn_matrix[0, :, 0, -N:].mean(dim=0)  # Average across heads -> (N,)
-
-    # Normalize to [0, 1]
     lo, hi = attn_raw.min(), attn_raw.max()
     attn_cls = (attn_raw - lo) / (hi - lo + 1e-8)
 
@@ -524,8 +450,8 @@ def _to_output_tensor(
 # Public AttributionMethod classes
 # ===========================================================================
 
-class Dinov2AllMethodsBase(AttributionMethod):
-    """Shared base for all six DINOv2 attribution methods.
+class Dinov2AllMethodsBase(ModelIndependentMethod):
+    """Shared base for all DINOv2 attribution methods.
 
     Handles model loading, configuration knobs, and the single shared forward
     pass.  Subclasses implement only ``_scores_from_fwd``.
@@ -533,7 +459,6 @@ class Dinov2AllMethodsBase(AttributionMethod):
 
     def __init__(self, method_name: str) -> None:
         super().__init__(method_name)
-        self.use_registers: bool  = getattr(config, "DINO_PCA_USE_REGISTERS", True)
         self.n_components:  int   = getattr(config, "DINO_PCA_N_COMPONENTS",  1)
         self.border:        int   = getattr(config, "DINO_PCA_BORDER",        1)
         self.center_frac:   float = getattr(config, "DINO_PCA_CENTER_FRAC",   0.4)
@@ -541,16 +466,10 @@ class Dinov2AllMethodsBase(AttributionMethod):
 
     def _get_model(self):
         if self._model is None:
-            self._model = _ensure_model(self.use_registers)
+            self._model = _ensure_model()
         return self._model
 
     def _shared_forward(self, img_pil: Image.Image) -> tuple[dict, np.ndarray]:
-        """Run the shared forward pass and compute the soft PCA base map.
-
-        Returns:
-            fwd:     Full forward-pass dict (tokens, attention, grid info).
-            pc_base: (N,) float32 soft PCA map in [0, 1] — the shared base.
-        """
         fwd     = _forward_once(self._get_model(), img_pil)
         pc_base = _pca_soft_base(fwd, self.n_components, self.border, self.center_frac)
         return fwd, pc_base
@@ -566,22 +485,7 @@ class Dinov2AllMethodsBase(AttributionMethod):
             scores, fwd["grid_h"], fwd["grid_w"], fwd["H_orig"], fwd["W_orig"]
         )
 
-    def compute(
-        self,
-        model,                   # unused — DINOv2 is self-contained
-        images: torch.Tensor,    # (B, C, H, W) ImageNet-normalized float32
-        targets: torch.Tensor,   # (B,) — unsupervised, not used
-    ) -> torch.Tensor:
-        """Compute heatmaps for a batch of images.
-
-        Args:
-            model:   Ignored. DINOv2 is loaded internally.
-            images:  Float32 tensor (B, C, H, W), ImageNet-normalized.
-            targets: Unused. Accepted for interface compatibility.
-
-        Returns:
-            Float32 tensor (B, H, W) in [0, 1].
-        """
+    def compute_independent(self, images: torch.Tensor) -> torch.Tensor:
         B, C, H, W = images.shape
         pil_images = _tensor_to_pil(images)
         heatmaps   = np.stack([self._heatmap_single(p) for p in pil_images], axis=0)

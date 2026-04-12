@@ -128,9 +128,10 @@ JUDGING_MODELS = [
 # Attribution Methods Configuration
 # -----------------
 ATTRIBUTION_METHODS = [
+    # --- Model-dependent (need the classifier) ---
     "saliency",
     "inputxgradient",
-    # "smoothgrad", # TODO: this method on vgg crash the pc. check why
+    # "smoothgrad",
     "guided_backprop",
     "integrated_gradients",
     "occlusion",
@@ -139,9 +140,8 @@ ATTRIBUTION_METHODS = [
     "grad_cam",
     "guided_gradcam",
     "random_baseline",
-    # "c3f", #proffesor said we dont care about this anymore
-    
-    # new methods for proffesor
+
+    # --- Model-independent (DINO / U2Net) ---
     "dinov2_attention",
     "dinov2_PC1",
     # "dinov2_PC_EV",
@@ -149,16 +149,21 @@ ATTRIBUTION_METHODS = [
     # "dinov2_COMBO_FIXED",
     # "dinov2_ENT",
     "dinov2_COMBO_ENT_SMOOTH",
-
-    #U2net
     "U2Net-Saliency",
     "u2net_dino_fusion",
+
+    # --- Continuous wrappers ---
+    # "integrated_gradients_continuous",
+    # "gradientshap_continuous",
 ]
 
-# Global switches for DINOv2 register usage in custom methods
-# If True, the corresponding DINOv2 attribution method will use a register-enabled model.
-DINO_PCA_USE_REGISTERS = True
-DINO_ATTENTION_USE_REGISTERS = True
+# -----------------
+# DINOv2 Configuration
+# -----------------
+# Shared DINO model used by both DINO methods and U2Net+DINO fusion.
+DINO_MODEL_NAME = "facebook/dinov2-with-registers-base"
+# ViT-B with registers exposes 4 register tokens.
+DINO_NUM_REGISTERS = 4
 
 # -----------------
 # Occlusion Configuration

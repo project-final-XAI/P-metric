@@ -4,26 +4,18 @@ import torch.nn.functional as F
 
 import gdown
 import config
-from attribution.base import AttributionMethod
+from attribution.base import ModelIndependentMethod
+from attribution._shared import DEVICE, get_cached_model
 
 # ---------------------------------------------------------------------------
 # Configuration & Paths
 # ---------------------------------------------------------------------------
 
-DEVICE = torch.device(
-    config.DEVICE if hasattr(config, "DEVICE")
-    else ("cuda" if torch.cuda.is_available() else "cpu")
-)
-
-# Canonical U2Net input size
 _U2NET_SIZE = (320, 320)
-_MODEL_CACHE: dict[str, nn.Module] = {}
 
-# Specific path requested by the user
 MODELS_DIR = getattr(config, "MODELS_DIR", None)
 WEIGHTS_PATH = MODELS_DIR / "u2net.pth"
 
-# Direct download link for the provided Google Drive ID
 DRIVE_ID = "1ao1ovG1Qtx4b7EoskHXmi2E9rp5CHLcZ"
 REMOTE_URL = f"https://drive.google.com/uc?id={DRIVE_ID}&export=download"
 
@@ -264,24 +256,21 @@ class U2NET(nn.Module):
 # ---------------------------------------------------------------------------
 
 def _ensure_u2net():
-    if "u2net" not in _MODEL_CACHE:
+    def _load():
         if not WEIGHTS_PATH.exists():
             print(f"[U2Net] Weights missing at {WEIGHTS_PATH}. Downloading from Drive...")
             gdown.download(REMOTE_URL, str(WEIGHTS_PATH), quiet=False)
-
         print(f"[U2Net] Initializing model on {DEVICE}...")
         model = U2NET(in_ch=3, out_ch=1)
         model.load_state_dict(torch.load(WEIGHTS_PATH, map_location=DEVICE))
         model.to(DEVICE).eval()
-        _MODEL_CACHE["u2net"] = model
-    return _MODEL_CACHE["u2net"]
+        return model
+
+    return get_cached_model("u2net", _load)
 
 
-class U2NetSaliencyMethod(AttributionMethod):
-    """
-    Independent Saliency Method using U-2-Net.
-    Operates at C:\\Users\\manoy\\Desktop\\לימודים\\פרויקט גמר\\P-metric\\models
-    """
+class U2NetSaliencyMethod(ModelIndependentMethod):
+    """Independent saliency method using U-2-Net."""
 
     def __init__(self, method_name: str = "u2net_saliency") -> None:
         super().__init__(method_name)
@@ -292,21 +281,14 @@ class U2NetSaliencyMethod(AttributionMethod):
             self._u2net = _ensure_u2net()
         return self._u2net
 
-    def compute(
-        self,
-        model: nn.Module,  # Ignored
-        images: torch.Tensor,  # (B, 3, H, W)
-        targets: torch.Tensor,  # Ignored
-    ) -> torch.Tensor:
+    def compute_independent(self, images: torch.Tensor) -> torch.Tensor:
         B, C, H, W = images.shape
         u2net = self._get_u2net()
 
-        # Resize batch to 320x320 for U2Net
         img_input = F.interpolate(images, size=_U2NET_SIZE, mode="bilinear", align_corners=False)
 
         with torch.no_grad():
             d0, *_ = u2net(img_input)
-            # Upsample back to original input resolution
             heatmap = F.interpolate(d0, size=(H, W), mode="bilinear", align_corners=False)
 
         return self._normalize_attribution(heatmap)

@@ -18,7 +18,7 @@ from torchvision import transforms
 
 # ── Import the new unified 6-method suite ────────────────────────────────────
 # Adjust the import path if your project layout differs.
-from attribution.dinov2_methods import (
+from attribution.model_independent.dinov2_methods import (
     Dinov2AttnMethod,
     Dinov2ComboEntropyMethod,
     Dinov2ComboFixedMethod,
