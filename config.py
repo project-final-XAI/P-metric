@@ -39,6 +39,7 @@ DATA_DIR = BASE_DIR / "data"
 HEATMAP_DIR = BASE_DIR / "results" / "heatmaps"
 RESULTS_DIR = BASE_DIR / "results" / "evaluation"
 ANALYSIS_DIR = BASE_DIR / "results" / "analysis"
+MODELS_DIR = BASE_DIR / "models"
 
 # -----------------
 # Hardware Configuration
@@ -141,14 +142,17 @@ ATTRIBUTION_METHODS = [
     # "c3f", #proffesor said we dont care about this anymore
     
     # new methods for proffesor
-    # "dinov2_pca_gaussian", #my old method
     "dinov2_attention",
     "dinov2_PC1",
-    "dinov2_PC_EV",
-    "dinov2_PC_L2",
-    "dinov2_COMBO_FIXED",
-    "dinov2_ENT",
+    # "dinov2_PC_EV",
+    # "dinov2_PC_L2",
+    # "dinov2_COMBO_FIXED",
+    # "dinov2_ENT",
     "dinov2_COMBO_ENT_SMOOTH",
+
+    #U2net
+    "U2Net-Saliency",
+    "u2net_dino_fusion",
 ]
 
 # Global switches for DINOv2 register usage in custom methods

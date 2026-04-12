@@ -18,8 +18,15 @@ from torchvision import transforms
 
 # ── Import the new unified 6-method suite ────────────────────────────────────
 # Adjust the import path if your project layout differs.
-from attribution.dinov2_methods import *
-from new_method import Dinov2UnifiedMethod, Dinov2PcaGaussianMethod, Dinov2ComboEntSmoothMethod1
+from attribution.dinov2_methods import (
+    Dinov2AttnMethod,
+    Dinov2ComboEntropyMethod,
+    Dinov2ComboFixedMethod,
+    Dinov2Pc1Method,
+    Dinov2PcEigenweightedMethod,
+    Dinov2PcL2Method,
+)
+from new_method import Dinov2UnifiedMethod, Dinov2PcaGaussianMethod
 
 
 # ---------------------------------------------------------------------------
@@ -79,8 +86,8 @@ def generate_comparison(base_path: str, n_images: int = 2) -> None:
         "PC_L2": Dinov2PcL2Method(),
         "ComboFixed": Dinov2ComboFixedMethod(),
         "ComboEnt": Dinov2ComboEntropyMethod(),
-        "entSnooth": Dinov2ComboEntSmoothMethod(),
-        "New_my" : Dinov2ComboEntSmoothMethod1(),
+        "Gaussian": Dinov2PcaGaussianMethod(),
+        "New_my" : Dinov2UnifiedMethod(),
     }
 
     for idx in range(n_images):
@@ -139,8 +146,7 @@ def generate_comparison(base_path: str, n_images: int = 2) -> None:
 
 if __name__ == "__main__":
     # Adjust path as needed for your local environment
-    imagenet_path = "../../data/sipakmed_cropped"
-    # imagenet_path = "../../data/imagenet"
+    imagenet_path = "../../data/imagenet"
 
     # Quick sanity check so it doesn't crash deep in matplotlib if the path is wrong
     if not os.path.exists(imagenet_path):

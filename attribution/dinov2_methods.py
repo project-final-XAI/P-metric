@@ -55,6 +55,7 @@ Configuration flags (all optional, read from ``config`` module)
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 import numpy as np
@@ -149,10 +150,6 @@ def _tensor_to_pil(images: torch.Tensor) -> list[Image.Image]:
 # Shared forward pass — extracts everything needed by all 6 methods at once
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Shared forward pass — extracts everything needed by all 6 methods at once
-# ---------------------------------------------------------------------------
-
 def _forward_once(model, img_pil: Image.Image) -> dict:
     """Run one DINOv2 forward pass and return all signals needed by all methods.
 
@@ -167,7 +164,7 @@ def _forward_once(model, img_pil: Image.Image) -> dict:
     # 1. Register a hook to intercept the QKV output of the very last block
     saved_qkv = []
 
-    def qkv_hook(module, input, output):
+    def qkv_hook(_module, _input, output):
         saved_qkv.append(output.detach())
 
     last_block = model.blocks[-1]
@@ -760,20 +757,13 @@ class Dinov2ComboEntSmoothMethod(Dinov2AllMethodsBase):
                                       (1.0 = fully gated, 0.0 = no gate).
     """
 
-    # def __init__(self, sigma: float = 1.0, gamma: float = 1.0, alpha: float = 0.7) -> None: OLD-> so minor on the previous (5)
-    # def __init__(self, sigma: float = 1.0, gamma: float = 2.5, alpha: float = 0.85) -> None: OLD -> worked well (4)
-    # def __init__(self, sigma: float = 1.3, gamma: float = .9, alpha: float = 0.6) -> None: OLD -> worked best so far (3)
-    # def __init__(self, sigma: float = 1.6, gamma: float = .8, alpha: float = 0.55) -> None: OLD -> worked even better (2)
-    # def __init__(self, sigma: float = 2, gamma: float = .7, alpha: float = 0.45) -> None: OLD -> slight better results (1)
-    def __init__(self, sigma: float = 2, gamma: float = .7, alpha: float = 0.45) -> None:
+    def __init__(self, sigma: float = 2.0, gamma: float = 0.7, alpha: float = 0.45) -> None:
         super().__init__("dinov2_combo_ent_smooth")
         self.sigma = sigma
         self.gamma = gamma
         self.alpha = alpha
 
     def _scores_from_fwd(self, fwd: dict, pc_base: np.ndarray) -> np.ndarray:
-        import math
-
         attn = _scores_attn(fwd)   # (N,) float32, [0,1]
         pc1  = pc_base             # (N,) float32, [0,1]
 
@@ -818,275 +808,3 @@ class Dinov2ComboEntSmoothMethod(Dinov2AllMethodsBase):
             scores = np.zeros_like(scores)
 
         return scores
-
-
-# ---------------------------------------------------------------------------
-# Method 9 — DINO_KEY_PCA
-# ---------------------------------------------------------------------------
-
-class Dinov2KeyPcaMethod(Dinov2AllMethodsBase):
-    """Attribution via PCA on last-block Key vectors.
-
-    Unlike the feature-based PCA (which runs on the final normalized patch
-    tokens), this method runs PCA directly on the Key projections of the last
-    transformer block's self-attention.  The Keys encode "what to attend to"
-    — they are the signal the Q vectors are matched against — which makes
-    them a richer discriminator of object vs background than the collapsed
-    post-norm features.
-
-    Why Keys specifically?
-    ~~~~~~~~~~~~~~~~~~~~~~
-    In a ViT self-attention layer, Queries ask "what am I looking for?",
-    Keys answer "what do I contain?".  Patches belonging to the same semantic
-    region (e.g. the foreground object) tend to have similar Key vectors.
-    A PCA on Keys therefore clusters foreground and background more cleanly
-    than a PCA on the final features, which have already been mixed by the
-    attention aggregation.  This is what the original DINO paper's demo uses
-    for segmentation masks.
-
-    Implementation detail
-    ~~~~~~~~~~~~~~~~~~~~~
-    The QKV hook is already registered in ``_forward_once`` to compute the
-    attention matrix.  However, the hook captures the *output of the QKV
-    projection* as a single (1, T, 3D) tensor, which is then split into Q,
-    K, V by reshaping.  This method re-registers its own hook to capture the
-    raw keys at patch resolution (excluding the CLS token).
-
-    Component selection and polarity correction are inherited from the shared
-    ``_pca_soft_base`` logic (center-border scoring + CLS cosine similarity),
-    reapplied here on the Key-derived components.
-
-    Configuration knobs: same as the feature-PCA methods (DINO_PCA_N_COMPONENTS,
-    DINO_PCA_BORDER, DINO_PCA_CENTER_FRAC, DINO_PCA_USE_REGISTERS).
-    """
-
-    def __init__(self) -> None:
-        super().__init__("dinov2_key_pca")
-
-    def _heatmap_single(self, img_pil: Image.Image) -> np.ndarray:
-        """Override to capture Keys in a dedicated hook."""
-        model = self._get_model()
-
-        img_t = _transform(img_pil).unsqueeze(0).to(DEVICE)
-        grid_h = img_t.shape[2] // _PATCH_SIZE
-        grid_w = img_t.shape[3] // _PATCH_SIZE
-        N = grid_h * grid_w
-
-        saved_qkv: list[torch.Tensor] = []
-
-        def qkv_hook(module, input, output):
-            saved_qkv.append(output.detach())
-
-        last_block = model.blocks[-1]
-        handle = last_block.attn.qkv.register_forward_hook(qkv_hook)
-
-        with torch.no_grad():
-            out = model.forward_features(img_t)
-
-        handle.remove()
-
-        # --- Parse patch tokens + CLS (same as _forward_once) -----------
-        if isinstance(out, dict) and "x_norm_patchtokens" in out:
-            patch_tokens = out["x_norm_patchtokens"][0].float()
-            cls_token    = out["x_norm_clstoken"][0].float().squeeze(0)
-        else:
-            all_tok  = (out[0] if torch.is_tensor(out) else out["x_prenorm"][0]).float()
-            n_prefix = all_tok.shape[0] - N
-            patch_tokens = all_tok[n_prefix:]
-            cls_token    = all_tok[0]
-
-        # --- Extract Key vectors for patch tokens only ------------------
-        qkv = saved_qkv[0]                         # (1, T, 3D)
-        B, T, three_D = qkv.shape
-        D = three_D // 3
-        num_heads = last_block.attn.num_heads
-        head_dim  = D // num_heads
-
-        # Reshape to (1, T, 3, num_heads, head_dim) then select K
-        qkv_r = qkv.reshape(B, T, 3, num_heads, head_dim).permute(2, 0, 3, 1, 4)
-        k_all = qkv_r[1]                            # (1, num_heads, T, head_dim)
-
-        # Concatenate all heads for each token → (T, D)
-        k_all_tokens = k_all[0].permute(1, 0, 2).reshape(T, D)  # (T, D)
-
-        # Drop CLS and any register tokens — keep only the last N patch tokens
-        k_patches = k_all_tokens[-N:].float()       # (N, D)
-
-        # --- PCA on Key vectors -----------------------------------------
-        feat = k_patches.cpu().numpy().astype(np.float32)
-        feat -= feat.mean(axis=0, keepdims=True)
-
-        n_comp = min(self.n_components, feat.shape[0], feat.shape[1])
-        pca    = PCA(n_components=n_comp, whiten=False)
-        pcs    = pca.fit_transform(feat)             # (N, n_comp)
-
-        # --- Center-border component selection (same scoring as _pca_soft_base)
-        bm = np.zeros((grid_h, grid_w), dtype=bool)
-        bm[:self.border, :]  = True
-        bm[-self.border:, :] = True
-        bm[:, :self.border]  = True
-        bm[:, -self.border:] = True
-        border_flat = bm.flatten()
-
-        cm = np.zeros((grid_h, grid_w), dtype=bool)
-        h0 = max(int(grid_h * (0.5 - self.center_frac / 2)), 0)
-        h1 = min(int(grid_h * (0.5 + self.center_frac / 2)), grid_h)
-        w0 = max(int(grid_w * (0.5 - self.center_frac / 2)), 0)
-        w1 = min(int(grid_w * (0.5 + self.center_frac / 2)), grid_w)
-        cm[h0:h1, w0:w1] = True
-        center_flat = cm.flatten()
-
-        best_score, best_comp = -np.inf, 0
-        for i in range(n_comp):
-            for sign in (+1.0, -1.0):
-                cand = sign * pcs[:, i]
-                lo, hi = cand.min(), cand.max()
-                cand_n = (cand - lo) / (hi - lo + 1e-8)
-                score  = cand_n[center_flat].mean() - cand_n[border_flat].mean()
-                if score > best_score:
-                    best_score, best_comp = score, i
-
-        # --- Polarity correction via CLS cosine similarity --------------
-        raw = _fix_polarity_cls(pcs[:, best_comp].copy(), patch_tokens, cls_token)
-        lo, hi = raw.min(), raw.max()
-        scores = ((raw - lo) / (hi - lo)).astype(np.float32) if hi - lo > 1e-8 \
-                 else np.zeros(N, dtype=np.float32)
-
-        W_orig, H_orig = img_pil.size
-        return _to_output_tensor(scores, grid_h, grid_w, H_orig, W_orig)
-
-    def _scores_from_fwd(self, fwd: dict, pc_base: np.ndarray) -> np.ndarray:
-        # Not called — _heatmap_single is overridden directly.
-        return pc_base
-
-# ---------------------------------------------------------------------------
-# Method 11 — DINO_MULTI_CROP
-# ---------------------------------------------------------------------------
-
-class Dinov2MultiCropMethod(Dinov2AllMethodsBase):
-    """Attribution via test-time crop augmentation (TTA) with COMBO_ENT base.
-
-    Runs the entropy-weighted attention + PC1 map (COMBO_ENT) on multiple
-    overlapping crops of the input image, warps each heatmap back to the
-    original image coordinates, and accumulates them into a single consensus
-    map.  Background noise that activates strongly in one crop tends to
-    activate weakly or not at all in crops where it is not centred — so the
-    accumulation acts as a natural spatial filter that reinforces only
-    consistently salient regions.
-
-    Crop strategy
-    ~~~~~~~~~~~~~
-    For each scale in ``scales``, ``n_crops`` crops are sampled at random
-    spatial positions.  Additionally, the full image and 5 deterministic
-    crops (centre + 4 corner quadrants at 0.75× scale) are always included.
-    All crops are resized to 518 × 518 before the DINOv2 forward pass.
-
-    Accumulation
-    ~~~~~~~~~~~~
-    Each per-crop heatmap is placed into an accumulator canvas (float64,
-    same spatial resolution as the original image) using the crop bounding
-    box.  A count canvas tracks how many crops contributed to each pixel.
-    The final map is the mean over contributing crops, normalized to [0, 1].
-
-    Args:
-        scales    (tuple[float]):  Crop size as a fraction of min(H, W).
-                                   Default (0.6, 0.8) gives two scale levels.
-        n_crops   (int):           Random crops per scale. Default 4.
-        seed      (int | None):    RNG seed for reproducibility. Default 0.
-
-    Trade-off
-    ~~~~~~~~~
-    Quality improves with more crops; runtime scales linearly.  At the
-    default settings (2 scales × 4 random + 6 fixed = 14 forward passes),
-    expect ~3-4× the latency of a single-pass method.  For production use,
-    reduce n_crops to 2 or restrict scales to a single value.
-    """
-
-    def __init__(
-        self,
-        scales: tuple[float, ...] = (0.6, 0.8),
-        n_crops: int = 4,
-        seed: int | None = 0,
-    ) -> None:
-        super().__init__("dinov2_multi_crop")
-        self.scales  = scales
-        self.n_crops = n_crops
-        self.seed    = seed
-
-    # ------------------------------------------------------------------
-    # Internal: single-crop COMBO_ENT score
-    # ------------------------------------------------------------------
-
-    def _combo_ent_scores(self, img_pil: Image.Image) -> tuple[np.ndarray, int, int]:
-        """Run COMBO_ENT on one PIL image; return (N,) scores + grid dims."""
-        fwd, pc_base = self._shared_forward(img_pil)
-        scores = _scores_combo_entropy(_scores_attn(fwd), pc_base)
-        return scores, fwd["grid_h"], fwd["grid_w"]
-
-    # ------------------------------------------------------------------
-    # Override _heatmap_single to drive the multi-crop loop
-    # ------------------------------------------------------------------
-
-    def _heatmap_single(self, img_pil: Image.Image) -> np.ndarray:
-        rng = np.random.default_rng(self.seed)
-
-        W_orig, H_orig = img_pil.size           # PIL: width × height
-
-        # Accumulator canvases at original resolution
-        accum = np.zeros((H_orig, W_orig), dtype=np.float64)
-        count = np.zeros((H_orig, W_orig), dtype=np.float64)
-
-        def _add_crop(crop_pil: Image.Image, x0: int, y0: int, cw: int, ch: int):
-            """Forward-pass one crop and splat the heatmap back."""
-            scores, gh, gw = self._combo_ent_scores(crop_pil)
-            # Upsample to crop pixel resolution
-            hm = _to_output_tensor(scores, gh, gw, ch, cw)  # (ch, cw)
-            accum[y0:y0 + ch, x0:x0 + cw] += hm
-            count[y0:y0 + ch, x0:x0 + cw] += 1.0
-
-        # --- 1. Full image -----------------------------------------------
-        _add_crop(img_pil, 0, 0, W_orig, H_orig)
-
-        # --- 2. Deterministic crops: centre + 4 corners at 0.75× --------
-        fixed_scale = 0.75
-        fcw = int(W_orig * fixed_scale)
-        fch = int(H_orig * fixed_scale)
-
-        fixed_offsets = [
-            ((W_orig - fcw) // 2, (H_orig - fch) // 2),   # centre
-            (0,              0),                            # top-left
-            (W_orig - fcw,   0),                            # top-right
-            (0,              H_orig - fch),                 # bottom-left
-            (W_orig - fcw,   H_orig - fch),                 # bottom-right
-        ]
-        for x0, y0 in fixed_offsets:
-            crop = img_pil.crop((x0, y0, x0 + fcw, y0 + fch))
-            _add_crop(crop, x0, y0, fcw, fch)
-
-        # --- 3. Random crops per scale -----------------------------------
-        min_dim = min(W_orig, H_orig)
-        for scale in self.scales:
-            csz = int(min_dim * scale)
-            for _ in range(self.n_crops):
-                x0 = int(rng.integers(0, max(W_orig - csz + 1, 1)))
-                y0 = int(rng.integers(0, max(H_orig - csz + 1, 1)))
-                cw = min(csz, W_orig - x0)
-                ch = min(csz, H_orig - y0)
-                if cw < _PATCH_SIZE or ch < _PATCH_SIZE:
-                    continue
-                crop = img_pil.crop((x0, y0, x0 + cw, y0 + ch))
-                _add_crop(crop, x0, y0, cw, ch)
-
-        # --- Mean over accumulated crops ---------------------------------
-        with np.errstate(invalid="ignore"):
-            result = np.where(count > 0, accum / count, 0.0).astype(np.float32)
-
-        lo, hi = result.min(), result.max()
-        if hi - lo > 1e-8:
-            result = (result - lo) / (hi - lo)
-
-        return result
-
-    def _scores_from_fwd(self, fwd: dict, pc_base: np.ndarray) -> np.ndarray:
-        # Not called — _heatmap_single is fully overridden.
-        return pc_base

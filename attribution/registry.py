@@ -14,6 +14,9 @@ from attribution.c3f import C3FMethod
 from attribution.dinov2_methods import *
 from attribution.oldDino import Dinov2PcaGaussianMethod
 
+from attribution.unet_based import U2NetSaliencyMethod
+from attribution.unet_dino import U2NetDinoFusionMethod
+
 # Registry of all available methods
 METHOD_REGISTRY = {
     "saliency": SaliencyMethod(),
@@ -37,6 +40,8 @@ METHOD_REGISTRY = {
     "dinov2_COMBO_FIXED": Dinov2ComboFixedMethod(),
     "dinov2_ENT": Dinov2ComboEntropyMethod(),
     "dinov2_COMBO_ENT_SMOOTH": Dinov2ComboEntSmoothMethod(),
+    "U2Net-Saliency": U2NetSaliencyMethod(),
+    "u2net_dino_fusion": U2NetDinoFusionMethod(),
 }
 
 
