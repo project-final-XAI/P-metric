@@ -11,6 +11,23 @@ import pandas as pd
 import seaborn as sns
 
 
+def _drop_at_75_score(method_df: pd.DataFrame, x_col: str, y_col: str) -> float:
+    """Single ranking rule for legends/colors: higher DROP@75 first."""
+    if method_df.empty:
+        return float("-inf")
+
+    base_level = method_df[x_col].min()
+    base_acc = method_df.loc[method_df[x_col] == base_level, y_col].mean()
+
+    if (method_df[x_col] == 75).any():
+        acc_at_75 = method_df.loc[method_df[x_col] == 75, y_col].mean()
+    else:
+        nearest_idx = (method_df[x_col] - 75).abs().idxmin()
+        acc_at_75 = float(method_df.loc[nearest_idx, y_col])
+
+    return float(base_acc - acc_at_75)
+
+
 def plot_accuracy_degradation_curves(
     results_df: pd.DataFrame,
     output_dir: Path,
@@ -40,12 +57,21 @@ def plot_accuracy_degradation_curves(
         
         plt.figure(figsize=(12, 8))
         sns.set_theme(style="whitegrid")
+
+        # Keep one consistent ordering rule: higher DROP@75 first.
+        rank_series = group_df.groupby(hue_col).apply(
+            lambda d: _drop_at_75_score(d, x_col=x_col, y_col=y_col)
+        )
+        hue_order = rank_series.sort_values(ascending=False).index.tolist()
+        palette = sns.color_palette("viridis", n_colors=len(hue_order))
         
         plot = sns.lineplot(
             data=group_df,
             x=x_col,
             y=y_col,
             hue=hue_col,
+            hue_order=hue_order,
+            palette=palette,
             marker='o',
             linewidth=2.5
         )
