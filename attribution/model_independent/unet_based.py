@@ -303,6 +303,7 @@ class U2NetSaliencyMethod(ModelIndependentMethod):
     def compute_independent(self, images: torch.Tensor) -> torch.Tensor:
         B, C, H, W = images.shape
         u2net = self._get_u2net()
+        model_device = next(u2net.parameters()).device
 
         # The dataloader gives us images already ImageNet-normalized.
         # To perfectly match the exact input preprocessing of the pure-PyTorch snippet,
@@ -314,7 +315,7 @@ class U2NetSaliencyMethod(ModelIndependentMethod):
         heatmaps = []
         _no_amp = (
             torch.amp.autocast("cuda", enabled=False)
-            if images.is_cuda
+            if model_device.type == "cuda"
             else nullcontext()
         )
 
@@ -330,7 +331,7 @@ class U2NetSaliencyMethod(ModelIndependentMethod):
             std_np  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
             inp = (inp - mean_np) / std_np
             
-            tensor = torch.from_numpy(inp.transpose(2, 0, 1)).unsqueeze(0).to(images.device)
+            tensor = torch.from_numpy(inp.transpose(2, 0, 1)).unsqueeze(0).to(model_device)
 
             # 3. Model inference
             with torch.no_grad(), _no_amp:
@@ -353,7 +354,9 @@ class U2NetSaliencyMethod(ModelIndependentMethod):
             else:
                 heatmap_np[:] = 0.0
 
-            heatmaps.append(torch.from_numpy(heatmap_np).to(device=images.device, dtype=images.dtype).unsqueeze(0))
+            heatmaps.append(
+                torch.from_numpy(heatmap_np).to(device=images.device, dtype=images.dtype).unsqueeze(0)
+            )
 
         # Stack into shape (B, 1, H, W)
         return torch.stack(heatmaps, dim=0)

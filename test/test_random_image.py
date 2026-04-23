@@ -1,5 +1,5 @@
 """
-test_dino.py — Compare DINOv2 attribution methods side-by-side.
+test_random_image.py — Compare DINOv2 attribution methods side-by-side.
 
 Run-all view includes:
   Original | Attn | PC1 | PC_EV | PC_L2 | ComboFixed | ComboEnt | ComboEnt Overlay
@@ -20,14 +20,10 @@ from torchvision import transforms
 # Adjust the import path if your project layout differs.
 from attribution.model_independent.dinov2_methods import (
     Dinov2AttnMethod,
-    Dinov2ComboEntropyMethod,
-    Dinov2ComboFixedMethod,
-    Dinov2Pc1Method,
-    Dinov2PcEigenweightedMethod,
-    Dinov2PcL2Method,
+    Dinov2ComboEntSmoothMethod
 )
-from new_method import Dinov2UnifiedMethod, Dinov2PcaGaussianMethod
-
+from attribution.model_independent.unet_dino import U2NetDinoFusionMethod
+from attribution.model_independent.unet_based import U2NetSaliencyMethod
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -66,6 +62,14 @@ _transform = transforms.Compose([
     transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
 ])
 
+def _to_2d_heatmap(hmap: np.ndarray) -> np.ndarray:
+    """Convert model output to a 2D heatmap for matplotlib."""
+    if hmap.ndim == 2:
+        return hmap
+    if hmap.ndim == 3 and hmap.shape[0] == 1:
+        return hmap[0]
+    raise ValueError(f"Expected heatmap shape (H,W) or (1,H,W), got {hmap.shape}")
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -80,13 +84,11 @@ def generate_comparison(base_path: str, n_images: int = 2) -> None:
     # 1. Instantiate all 6 methods
     # The internal caching in Dinov2Extractor ensures DINOv2 is only loaded once.
     methods = {
-        # "Attn": Dinov2AttnMethod(),
-        "PC1": Dinov2Pc1Method(),
-        # "PC_EV": Dinov2PcEigenweightedMethod(),
-        "PC_L2": Dinov2PcL2Method(),
-        "ComboFixed": Dinov2ComboFixedMethod(),
-        "ComboEnt": Dinov2ComboEntropyMethod(),
-  }
+        "dino-attention": Dinov2AttnMethod(),
+        "dino-ComboEntSmooth": Dinov2ComboEntSmoothMethod(),
+        "u2net": U2NetSaliencyMethod(),
+        "dino-u2net": U2NetDinoFusionMethod(),
+    }
 
     for idx in range(n_images):
         print(f"\n── Image {idx + 1}/{n_images} ──────────────────────────────────")
@@ -103,7 +105,8 @@ def generate_comparison(base_path: str, n_images: int = 2) -> None:
         for name, method in methods.items():
             print(f"[{name:^10}] computing for: {img_name}")
             # [0] to grab the first item in the batch, then to numpy
-            heatmaps[name] = method.compute(None, img_tensor, None)[0].cpu().numpy()
+            raw_hmap = method.compute(None, img_tensor, None)[0].cpu().numpy()
+            heatmaps[name] = _to_2d_heatmap(raw_hmap)
 
         # 3. Resize original to match heatmap spatial dims (for overlay)
         # Using the shape of the last computed heatmap
@@ -111,13 +114,12 @@ def generate_comparison(base_path: str, n_images: int = 2) -> None:
         img_np = np.array(img_pil.resize((W, H))) / 255.0
 
         # 4. Build figure
-        # Columns: Original + 6 Methods + Overlay (ComboEnt)
         ncols = 2 + len(methods)
         fig, axes = plt.subplots(1, ncols, figsize=(4 * ncols, 4))
         fig.suptitle(f"DINOv2 Attribution Suite — {img_name}", fontsize=14, weight='bold')
 
         # Setup column layout mapping
-        plot_data = [("Original", None)] + list(heatmaps.items()) + [("ComboEnt Overlay", heatmaps["ComboEnt"])]
+        plot_data = [("Original", None)] + list(heatmaps.items()) + [("dino-u2net Overlay", heatmaps["dino-u2net"])]
 
         for col, (ax, (title, hmap)) in enumerate(zip(axes, plot_data)):
             ax.set_title(title, fontsize=11)
@@ -144,8 +146,8 @@ def generate_comparison(base_path: str, n_images: int = 2) -> None:
 
 if __name__ == "__main__":
     # Adjust path as needed for your local environment
-    imagenet_path = "../../data/sipakmed_cropped"
-    # imagenet_path = "../../data/imagenet"
+    # imagenet_path = "../../data/sipakmed_cropped"
+    imagenet_path = "../data/imagenet"
 
     # Quick sanity check so it doesn't crash deep in matplotlib if the path is wrong
     if not os.path.exists(imagenet_path):
