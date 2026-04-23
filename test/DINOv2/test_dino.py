@@ -86,9 +86,7 @@ def generate_comparison(base_path: str, n_images: int = 2) -> None:
         "PC_L2": Dinov2PcL2Method(),
         "ComboFixed": Dinov2ComboFixedMethod(),
         "ComboEnt": Dinov2ComboEntropyMethod(),
-        "Gaussian": Dinov2PcaGaussianMethod(),
-        "New_my" : Dinov2UnifiedMethod(),
-    }
+  }
 
     for idx in range(n_images):
         print(f"\n── Image {idx + 1}/{n_images} ──────────────────────────────────")
@@ -146,7 +144,8 @@ def generate_comparison(base_path: str, n_images: int = 2) -> None:
 
 if __name__ == "__main__":
     # Adjust path as needed for your local environment
-    imagenet_path = "../../data/imagenet"
+    imagenet_path = "../../data/sipakmed_cropped"
+    # imagenet_path = "../../data/imagenet"
 
     # Quick sanity check so it doesn't crash deep in matplotlib if the path is wrong
     if not os.path.exists(imagenet_path):

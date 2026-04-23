@@ -32,8 +32,8 @@ class AttributionMethod(ABC):
         pass
 
     def _normalize_attribution(self, attribution: torch.Tensor) -> torch.Tensor:
-        """Normalize attribution to [0, 1] range."""
-        att_abs = torch.abs(attribution.cpu().detach())
+        """Normalize attribution to [0, 1] range (same device as input)."""
+        att_abs = torch.abs(attribution.detach())
 
         if att_abs.ndim == 4 and att_abs.shape[1] > 1:
             att_abs = torch.mean(att_abs, dim=1)

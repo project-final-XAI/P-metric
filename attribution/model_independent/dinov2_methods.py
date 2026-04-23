@@ -59,7 +59,8 @@ _IMAGENET_STD  = (0.229, 0.224, 0.225)
 def _ensure_model():
     """Load and cache the HuggingFace DINOv2-base model with registers."""
     def _load():
-        m = AutoModel.from_pretrained(_DINO_MODEL_NAME)
+        attn_impl = getattr(config, "DINO_ATTN_IMPLEMENTATION", "eager")
+        m = AutoModel.from_pretrained(_DINO_MODEL_NAME, attn_implementation=attn_impl)
         expected_regs = getattr(config, "DINO_NUM_REGISTERS", 4)
         actual_regs = getattr(m.config, "num_register_tokens", expected_regs)
         if actual_regs != expected_regs:
@@ -123,6 +124,12 @@ def _forward_once(model, img_pil: Image.Image) -> dict:
 
     with torch.no_grad():
         outputs = model(img_t, output_attentions=True)
+
+    if outputs.attentions is None:
+        raise RuntimeError(
+            "DINO returned attentions=None. Use DINO_ATTN_IMPLEMENTATION='eager' in config "
+            "(Transformers SDPA does not materialize attention weights)."
+        )
 
     hidden = outputs.last_hidden_state[0].float()          # (T, D)
     num_regs = getattr(config, "DINO_NUM_REGISTERS", 4)

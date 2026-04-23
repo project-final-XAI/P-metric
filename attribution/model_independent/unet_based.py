@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,6 +14,12 @@ from attribution._shared import DEVICE, get_cached_model
 # ---------------------------------------------------------------------------
 
 _U2NET_SIZE = (320, 320)
+
+# ImageNet normalization (same as data loader). U-2-Net was trained on RGB in [0, 1],
+# not on normalized tensors — feeding normalized inputs often yields flat ~0 saliency
+# and black heatmaps after visualization.
+_IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406])
+_IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225])
 
 MODELS_DIR = getattr(config, "MODELS_DIR", None)
 WEIGHTS_PATH = MODELS_DIR / "u2net.pth"
@@ -285,9 +293,19 @@ class U2NetSaliencyMethod(ModelIndependentMethod):
         B, C, H, W = images.shape
         u2net = self._get_u2net()
 
-        img_input = F.interpolate(images, size=_U2NET_SIZE, mode="bilinear", align_corners=False)
+        mean = _IMAGENET_MEAN.to(device=images.device, dtype=images.dtype).view(1, 3, 1, 1)
+        std = _IMAGENET_STD.to(device=images.device, dtype=images.dtype).view(1, 3, 1, 1)
+        rgb01 = (images * std + mean).clamp(0, 1)
+        img_input = F.interpolate(rgb01, size=_U2NET_SIZE, mode="bilinear", align_corners=False)
 
-        with torch.no_grad():
+        # Phase 1 wraps attribution in autocast(float16). U-2-Net + BatchNorm in fp16 often
+        # yields nearly flat saliency; _save_heatmap_png then maps min==max to all zeros (black).
+        _no_amp = (
+            torch.amp.autocast("cuda", enabled=False)
+            if images.is_cuda
+            else nullcontext()
+        )
+        with torch.no_grad(), _no_amp:
             d0, *_ = u2net(img_input)
             heatmap = F.interpolate(d0, size=(H, W), mode="bilinear", align_corners=False)
 

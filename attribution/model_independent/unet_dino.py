@@ -22,7 +22,8 @@ _DINO_INPUT_SIZE = (224, 224)
 
 def _ensure_dinov2_hf():
     def _load():
-        model = AutoModel.from_pretrained(DINO_MODEL_NAME)
+        attn_impl = getattr(config, "DINO_ATTN_IMPLEMENTATION", "eager")
+        model = AutoModel.from_pretrained(DINO_MODEL_NAME, attn_implementation=attn_impl)
         expected_regs = getattr(config, "DINO_NUM_REGISTERS", 4)
         actual_regs = getattr(model.config, "num_register_tokens", expected_regs)
         if actual_regs != expected_regs:

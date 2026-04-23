@@ -88,36 +88,36 @@ DATASET_CONFIG = {
 }
 
 # Current dataset to use
-# DATASET_NAME = "imagenet"
-DATASET_NAME = "SIPaKMeD_cropped"
+DATASET_NAME = "imagenet"
+# DATASET_NAME = "SIPaKMeD_cropped"
 
 # -----------------
 # Model Configuration
 # -----------------
 # Models used for generating attribution heatmaps (Phase 1)
 GENERATING_MODELS = [
-    # "resnet50",
-    # "mobilenet_v2",
-    # "vgg16",
+    "resnet50",
+    "mobilenet_v2",
+    "vgg16",
 
     # "vit_b_16",
     # "swin_t",
 
-    "sipakmed_cropped_efficientnet.pth",
-    "sipakmed_cropped_ResNet50.pth",
+    # "sipakmed_cropped_efficientnet.pth",
+    # "sipakmed_cropped_ResNet50.pth",
 ]
 
 # Models used for evaluating occluded images (Phase 2)
 JUDGING_MODELS = [
-    # "resnet50",
-    # "mobilenet_v2",
-    # "vgg16",
+    "resnet50",
+    "mobilenet_v2",
+    "vgg16",
 
     # "vit_b_16",
     # "swin_t",
 
-    "sipakmed_cropped_efficientnet.pth",
-    "sipakmed_cropped_ResNet50.pth",
+    # "sipakmed_cropped_efficientnet.pth",
+    # "sipakmed_cropped_ResNet50.pth",
 
     # "llama3.2-vision-binary",
     # "llama3.2-vision-cosine",
@@ -143,7 +143,7 @@ ATTRIBUTION_METHODS = [
 
     # --- Model-independent (DINO / U2Net) ---
     "dinov2_attention",
-    "dinov2_PC1",
+    # "dinov2_PC1",
     # "dinov2_PC_EV",
     # "dinov2_PC_L2",
     # "dinov2_COMBO_FIXED",
@@ -154,7 +154,7 @@ ATTRIBUTION_METHODS = [
 
     # --- Continuous wrappers ---
     # "saliency_continuous",
-    # "inputxgradient_continuous",
+    "inputxgradient_continuous",
     # "guided_backprop_continuous",
     # "integrated_gradients_continuous",
     # "gradientshap_continuous",
@@ -168,7 +168,7 @@ ATTRIBUTION_METHODS = [
 
     # --- U2Net underlay + XAI fill ---
     # "saliency_u2net_fill",
-    # "inputxgradient_u2net_fill",
+    "inputxgradient_u2net_fill",
     # "guided_backprop_u2net_fill",
     # "integrated_gradients_u2net_fill",
     # "gradientshap_u2net_fill",
@@ -186,6 +186,8 @@ ATTRIBUTION_METHODS = [
 DINO_MODEL_NAME = "facebook/dinov2-with-registers-base"
 # ViT-B with registers exposes 4 register tokens.
 DINO_NUM_REGISTERS = 4
+# "eager" is required for output_attentions (SDPA returns None → DINO XAI methods crash).
+DINO_ATTN_IMPLEMENTATION = "eager"
 
 # -----------------
 # Occlusion Configuration
