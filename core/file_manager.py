@@ -25,6 +25,14 @@ class FileManager:
         self.results_dir = self.base_dir / "results" / "evaluation"
         self.analysis_dir = self.base_dir / "results" / "analysis"
     
+    # ==================== Helpers ====================
+
+    @staticmethod
+    def _sanitize_category(name: str) -> str:
+        """Sanitize a category name for use in filenames."""
+        safe = name.replace(" ", "_").replace(",", "").replace("/", "_").replace("\\", "_")
+        return "".join(c for c in safe if c.isalnum() or c in "_-")[:30]
+
     # ==================== Heatmap Paths (Phase 1) ====================
     
     def get_heatmap_dir(self, dataset: str) -> Path:
@@ -43,9 +51,7 @@ class FileManager:
             category_name: Optional category name (for ImageNet) to include in filename
         """
         if category_name and dataset == "imagenet":
-            # Sanitize category name for filename (remove special chars, spaces -> underscores)
-            safe_category = category_name.replace(" ", "_").replace(",", "").replace("/", "_").replace("\\", "_")
-            safe_category = "".join(c for c in safe_category if c.isalnum() or c in "_-")[:30]  # Limit length
+            safe_category = self._sanitize_category(category_name)
             filename = f"{model}-{method}-{img_id}-{safe_category}.npy"
         else:
             filename = f"{model}-{method}-{img_id}.npy"
@@ -63,9 +69,7 @@ class FileManager:
             category_name: Optional category name (for ImageNet) to include in filename
         """
         if category_name and dataset == "imagenet":
-            # Sanitize category name for filename (remove special chars, spaces -> underscores)
-            safe_category = category_name.replace(" ", "_").replace(",", "").replace("/", "_").replace("\\", "_")
-            safe_category = "".join(c for c in safe_category if c.isalnum() or c in "_-")[:30]  # Limit length
+            safe_category = self._sanitize_category(category_name)
             filename = f"{model}-{method}-{img_id}-{safe_category}.png"
         else:
             filename = f"{model}-{method}-{img_id}.png"

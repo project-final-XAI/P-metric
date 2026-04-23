@@ -14,7 +14,6 @@ from PIL import Image
 from tqdm import tqdm
 from typing import Dict, Any
 
-from core import gpu_manager
 from core.gpu_manager import GPUManager
 from core.file_manager import FileManager
 from core.gpu_utils import prepare_batch_tensor
@@ -22,6 +21,15 @@ from attribution.registry import get_attribution_method
 from data.loader import get_dataloader
 from evaluation.occlusion import sort_pixels
 from data.imagenet_class_mapping import get_cached_mapping, format_class_for_llm
+
+
+_COLORMAP_CV2 = {
+    "hot": cv2.COLORMAP_HOT,
+    "jet": cv2.COLORMAP_JET,
+    "viridis": cv2.COLORMAP_VIRIDIS,
+    "rainbow": cv2.COLORMAP_RAINBOW,
+    "turbo": cv2.COLORMAP_TURBO,
+}
 
 
 class Phase1Runner:
@@ -50,22 +58,34 @@ class Phase1Runner:
         
         # Load ImageNet class mapping if needed (for category names in filenames)
         self.imagenet_mapping = None
+        self.synset_ids = []
         if config.DATASET_NAME == "imagenet":
             try:
                 self.imagenet_mapping = get_cached_mapping()
-                # Also need synset IDs in order to map label index -> synset ID -> category name
                 from config import DATASET_CONFIG
                 import os
                 dataset_path = DATASET_CONFIG.get("imagenet", {}).get("path")
                 if dataset_path and os.path.exists(dataset_path):
                     self.synset_ids = sorted([d for d in os.listdir(dataset_path) 
                                             if os.path.isdir(os.path.join(dataset_path, d))])
-                else:
-                    self.synset_ids = []
             except Exception as e:
                 logging.warning(f"Could not load ImageNet mapping for category names: {e}")
                 self.imagenet_mapping = None
                 self.synset_ids = []
+
+    def _category_name_for_label(self, dataset_name: str, label: int) -> str | None:
+        """Resolve ImageNet label index to a sanitized category name, or None."""
+        if dataset_name != "imagenet" or not self.imagenet_mapping or not self.synset_ids:
+            return None
+        try:
+            if label < len(self.synset_ids):
+                synset_id = self.synset_ids[label]
+                full = self.imagenet_mapping.get(synset_id, "")
+                if full:
+                    return format_class_for_llm(full)
+        except Exception as e:
+            logging.debug(f"Could not get category name for label {label}: {e}")
+        return None
     
     def run(self, get_cached_model_func):
         """
@@ -95,7 +115,8 @@ class Phase1Runner:
             self.file_manager.ensure_dir_exists(heatmap_dir)
             
             # Load dataset once
-            dataloader = get_dataloader(dataset_name, batch_size=32, shuffle=False)
+            loader_batch = getattr(self.config, 'HEATMAP_BATCH_SIZE', 12)
+            dataloader = get_dataloader(dataset_name, batch_size=loader_batch, shuffle=False)
             image_label_map = {}
             global_idx = 0
             for batch_images, batch_labels in dataloader:
@@ -122,7 +143,7 @@ class Phase1Runner:
                                 image_label_map, dataset_name
                             )
                         except Exception as e:
-                            logging.error(f"Error: {model_name}-{method_name}: {e}")
+                            logging.error(f"Error: {model_name}-{method_name}: {e}", exc_info=True)
                         finally:
                             pbar.update(1)
             
@@ -152,36 +173,37 @@ class Phase1Runner:
         method = get_attribution_method(method_name)
         batch_size = self.gpu_manager.get_batch_size(method_name)
         
-        # Collect images that need processing (skip if already processed)
+        # Collect images that need processing (skip if already processed).
+        # Pre-compute paths so the save loop doesn't redo FileManager calls.
         images_to_process = []
         image_ids = []
         labels = []
+        sorted_paths = []
+        regular_paths = []
         
-        for img_id, (img, label) in list(image_label_map.items()):
-            # Get category name for ImageNet
-            category_name = None
-            if dataset_name == "imagenet" and self.imagenet_mapping and self.synset_ids:
-                try:
-                    if label < len(self.synset_ids):
-                        synset_id = self.synset_ids[label]
-                        category_name_full = self.imagenet_mapping.get(synset_id, "")
-                        if category_name_full:
-                            category_name = format_class_for_llm(category_name_full)
-                except Exception as e:
-                    logging.debug(f"Could not get category name for label {label}: {e}")
+        for img_id, (img, label) in image_label_map.items():
+            category_name = self._category_name_for_label(dataset_name, label)
             
-            sorted_path = self.file_manager.get_sorted_heatmap_path(
+            s_path = self.file_manager.get_sorted_heatmap_path(
                 dataset_name, model_name, method_name, img_id, category_name
             )
-            regular_path = self.file_manager.get_regular_heatmap_path(
+            r_path = self.file_manager.get_regular_heatmap_path(
                 dataset_name, model_name, method_name, img_id, category_name
             )
             
-            # Only process if either file doesn't exist
-            if not sorted_path.exists() or not regular_path.exists():
+            if not s_path.exists() or not r_path.exists():
                 images_to_process.append(img)
                 image_ids.append(img_id)
                 labels.append(label)
+                sorted_paths.append(s_path)
+                regular_paths.append(r_path)
+        
+        # Pre-create output directories (deduplicated)
+        seen_dirs = set()
+        for p in sorted_paths + regular_paths:
+            if p.parent not in seen_dirs:
+                self.file_manager.ensure_dir_exists(p.parent)
+                seen_dirs.add(p.parent)
         
         if not images_to_process:
             return
@@ -216,40 +238,15 @@ class Phase1Runner:
             # Save sorted pixel indices and regular PNG
             if heatmaps is not None:
                 for j, heatmap in enumerate(heatmaps):
-                    img_id = image_ids[i + j]
-                    label = labels[i + j]
+                    idx = i + j
                     heatmap_np = heatmap.cpu().numpy()
                     
-                    # Handle multi-channel heatmaps (take mean if needed)
                     if heatmap_np.ndim == 3:
                         heatmap_np = np.mean(heatmap_np, axis=0)
                     
-                    # Get category name for ImageNet
-                    category_name = None
-                    if dataset_name == "imagenet" and self.imagenet_mapping and self.synset_ids:
-                        try:
-                            if label < len(self.synset_ids):
-                                synset_id = self.synset_ids[label]
-                                category_name_full = self.imagenet_mapping.get(synset_id, "")
-                                if category_name_full:
-                                    category_name = format_class_for_llm(category_name_full)
-                        except Exception as e:
-                            logging.debug(f"Could not get category name for label {label}: {e}")
-                    
-                    # Sort pixels by importance and save NPY
                     sorted_indices = sort_pixels(heatmap_np)
-                    sorted_path = self.file_manager.get_sorted_heatmap_path(
-                        dataset_name, model_name, method_name, img_id, category_name
-                    )
-                    self.file_manager.ensure_dir_exists(sorted_path.parent)
-                    np.save(sorted_path, sorted_indices)
-                    
-                    # Save regular PNG heatmap
-                    regular_path = self.file_manager.get_regular_heatmap_path(
-                        dataset_name, model_name, method_name, img_id, category_name
-                    )
-                    self.file_manager.ensure_dir_exists(regular_path.parent)
-                    self._save_heatmap_png(heatmap_np, regular_path)
+                    np.save(sorted_paths[idx], sorted_indices)
+                    self._save_heatmap_png(heatmap_np, regular_paths[idx])
         
         # Cleanup: check temperature and clear cache if needed
         self.gpu_manager.check_and_throttle()
@@ -269,17 +266,8 @@ class Phase1Runner:
         # Convert to uint8
         hmap_uint8 = (hmap * 255).astype(np.uint8)
         
-        # Map colormap names to OpenCV constants
-        colormap_dict = {
-            "hot": cv2.COLORMAP_HOT,
-            "jet": cv2.COLORMAP_JET,
-            "viridis": cv2.COLORMAP_VIRIDIS,
-            "rainbow": cv2.COLORMAP_RAINBOW,
-            "turbo": cv2.COLORMAP_TURBO,
-        }
-        
         colormap = getattr(self.config, 'HEATMAP_COLORMAP', 'hot')
-        cv_colormap = colormap_dict.get(colormap.lower(), cv2.COLORMAP_HOT)
+        cv_colormap = _COLORMAP_CV2.get(colormap.lower(), cv2.COLORMAP_HOT)
         
         # Apply colormap
         heatmap_colored = cv2.applyColorMap(hmap_uint8, cv_colormap)
@@ -291,37 +279,9 @@ class Phase1Runner:
 
 def main():
     """Simple main function to run Phase 1."""
-    import sys
-    import logging
-    from pathlib import Path
-    
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-    import config
-    from core.gpu_manager import GPUManager
-    from core.file_manager import FileManager
-    from models.loader import load_model
-    from evaluation.judging.binary_llm_judge import BinaryLLMJudge
-    from evaluation.judging.cosine_llm_judge import CosineSimilarityLLMJudge
-    from evaluation.judging.classid_llm_judge import ClassIdLLMJudge
-    
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    
-    gpu_manager = GPUManager()
-    file_manager = FileManager(config.BASE_DIR)
-    model_cache = {}
-    
-    def get_cached_model(name):
-        if name not in model_cache:
-            if name.endswith('-binary'):
-                model_cache[name] = BinaryLLMJudge(name, config.DATASET_NAME, 0.0)
-            elif name.endswith('-cosine'):
-                model_cache[name] = CosineSimilarityLLMJudge(name, config.DATASET_NAME, 0.1, 0.8, "nomic-embed-text")
-            elif name.endswith('-classid'):
-                model_cache[name] = ClassIdLLMJudge(name, config.DATASET_NAME, 0.0)
-            else:
-                model_cache[name] = load_model(name)
-        return model_cache[name]
-    
+    from core._bootstrap import bootstrap_runner
+    config, gpu_manager, file_manager, model_cache, get_cached_model = bootstrap_runner()
+
     runner = Phase1Runner(config, gpu_manager, file_manager, model_cache)
     runner.run(get_cached_model)
 

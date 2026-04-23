@@ -23,6 +23,10 @@ from data.loader import get_dataloader
 from evaluation.occlusion import apply_occlusion_batch
 
 
+_IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+_IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
+
 class Phase2Runner:
     """Handles Phase 2: Pre-generation of all occluded images."""
 
@@ -127,7 +131,7 @@ class Phase2Runner:
 
     def _load_dataset_images(self, dataset_name: str) -> Dict[str, Tuple[torch.Tensor, int]]:
         """Load all dataset images into memory once."""
-        batch_size = getattr(self.config, 'PHASE2_BATCH_SIZE', 128)
+        batch_size = getattr(self.config, 'PHASE2_BATCH_SIZE', 256)
         dataloader = get_dataloader(dataset_name, batch_size=batch_size, shuffle=False)
         image_label_map: Dict[str, Tuple[torch.Tensor, int]] = {}
         global_idx = 0
@@ -178,8 +182,8 @@ class Phase2Runner:
                     )
                     imagenet_mapping = mapping
                     format_fn = format_class_for_llm
-            except Exception:
-                pass
+            except Exception as e:
+                logging.debug(f"Could not load ImageNet mapping: {e}")
 
         # --- Build path for every image ---
         path_map: Dict[str, Path] = {}
@@ -263,60 +267,53 @@ class Phase2Runner:
 
         images_to_process: List[torch.Tensor] = []
         sorted_indices_list: List[np.ndarray] = []
-        image_ids: List[str] = []
+        occluded_paths: List[Path] = []
 
         for img_id, (img, _) in image_label_map.items():
-            # Skip images with no heatmap
             if img_id not in sorted_path_map:
                 continue
 
-            occluded_path = self.file_manager.get_occluded_image_path(
+            occ_path = self.file_manager.get_occluded_image_path(
                 dataset_name, model_name, strategy, method_name, level, img_id
             )
 
-            # Fast existence check via cached directory listing
-            existing = self._get_existing_occluded(occluded_path.parent)
-            if occluded_path.name in existing:
+            existing = self._get_existing_occluded(occ_path.parent)
+            if occ_path.name in existing:
                 continue
 
             sorted_indices = np.load(sorted_path_map[img_id])
             images_to_process.append(img)
             sorted_indices_list.append(sorted_indices)
-            image_ids.append(img_id)
+            occluded_paths.append(occ_path)
 
         if not images_to_process:
             return
 
-        batch_size = getattr(self.config, 'PHASE2_BATCH_SIZE', 128)
-        save_workers = getattr(self.config, 'PHASE2_SAVE_WORKERS', 4)
+        batch_size = getattr(self.config, 'PHASE2_BATCH_SIZE', 256)
+        save_workers = getattr(self.config, 'PHASE2_SAVE_WORKERS', 8)
 
         for i in range(0, len(images_to_process), batch_size):
             batch_images = images_to_process[i:i + batch_size]
             batch_indices = sorted_indices_list[i:i + batch_size]
-            batch_ids = image_ids[i:i + batch_size]
+            batch_occ_paths = occluded_paths[i:i + batch_size]
 
             occluded_images = apply_occlusion_batch(
                 batch_images,
                 batch_indices,
                 level,
                 strategy,
-                image_shape=(224, 224)
+                image_shape=getattr(self.config, 'OCCLUSION_IMAGE_SHAPE', (224, 224))
             )
 
-            # Build save tasks and ensure directories exist (grouped to avoid
-            # redundant mkdir calls for the same parent)
             seen_dirs: Set[Path] = set()
             save_tasks: List[Tuple[torch.Tensor, Path]] = []
 
             for j, occluded_img in enumerate(occluded_images):
-                img_id = batch_ids[j]
-                occluded_path = self.file_manager.get_occluded_image_path(
-                    dataset_name, model_name, strategy, method_name, level, img_id
-                )
-                if occluded_path.parent not in seen_dirs:
-                    self.file_manager.ensure_dir_exists(occluded_path.parent)
-                    seen_dirs.add(occluded_path.parent)
-                save_tasks.append((occluded_img, occluded_path))
+                occ_path = batch_occ_paths[j]
+                if occ_path.parent not in seen_dirs:
+                    self.file_manager.ensure_dir_exists(occ_path.parent)
+                    seen_dirs.add(occ_path.parent)
+                save_tasks.append((occluded_img, occ_path))
 
             # Parallel I/O saves
             if save_workers > 1 and len(save_tasks) > 1:
@@ -349,9 +346,7 @@ class Phase2Runner:
         elif img_tensor.ndim == 2:
             img_tensor = img_tensor.unsqueeze(0).repeat(3, 1, 1)
 
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-        img_tensor = torch.clamp(img_tensor * std + mean, 0, 1)
+        img_tensor = torch.clamp(img_tensor * _IMAGENET_STD + _IMAGENET_MEAN, 0, 1)
 
         img_array = (img_tensor.numpy() * 255).astype(np.uint8)
 
@@ -373,37 +368,8 @@ class Phase2Runner:
 # ----------------------------------------------------------------------
 
 def main():
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-    import config
-    from core.gpu_manager import GPUManager
-    from core.file_manager import FileManager
-    from models.loader import load_model
-    from evaluation.judging.binary_llm_judge import BinaryLLMJudge
-    from evaluation.judging.cosine_llm_judge import CosineSimilarityLLMJudge
-    from evaluation.judging.classid_llm_judge import ClassIdLLMJudge
-
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-    gpu_manager = GPUManager()
-    file_manager = FileManager(config.BASE_DIR)
-    model_cache = {}
-
-    def get_cached_model(name):
-        if name not in model_cache:
-            if name.endswith('-binary'):
-                model_cache[name] = BinaryLLMJudge(name, config.DATASET_NAME, 0.0)
-            elif name.endswith('-cosine'):
-                model_cache[name] = CosineSimilarityLLMJudge(
-                    name, config.DATASET_NAME, 0.1, 0.8, "nomic-embed-text"
-                )
-            elif name.endswith('-classid'):
-                model_cache[name] = ClassIdLLMJudge(name, config.DATASET_NAME, 0.0)
-            else:
-                model_cache[name] = load_model(name)
-        return model_cache[name]
+    from core._bootstrap import bootstrap_runner
+    config, gpu_manager, file_manager, model_cache, get_cached_model = bootstrap_runner()
 
     runner = Phase2Runner(config, gpu_manager, file_manager, model_cache)
     runner.run(get_cached_model)

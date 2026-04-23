@@ -8,7 +8,7 @@ code is centralized here for better readability and maintainability.
 
 import torch
 import logging
-from typing import List, Tuple, Optional
+from typing import List, Optional, Tuple
 
 
 def get_memory_usage() -> Tuple[float, float]:
@@ -66,36 +66,6 @@ def sync_and_clear() -> None:
         pass
 
 
-def transfer_to_device(
-    tensor: torch.Tensor,
-    device: str,
-    non_blocking: bool = True,
-    memory_format: Optional[torch.memory_format] = None
-) -> torch.Tensor:
-    """
-    Transfer tensor to device with optional memory format optimization.
-    
-    Args:
-        tensor: Input tensor
-        device: Target device ('cuda' or 'cpu')
-        non_blocking: Whether to use non-blocking transfer (faster, async)
-        memory_format: Optional memory format (e.g., torch.channels_last for CNNs)
-        
-    Returns:
-        Tensor on target device
-    """
-    result = tensor.to(device, non_blocking=non_blocking)
-    
-    if memory_format is not None and result.ndim == 4:
-        try:
-            result = result.to(memory_format=memory_format, non_blocking=non_blocking)
-        except Exception:
-            # Some tensors don't support memory format conversion
-            pass
-    
-    return result
-
-
 def prepare_batch_tensor(
     images: List[torch.Tensor],
     device: str,
@@ -143,26 +113,3 @@ def prepare_batch_tensor(
     return batch_tensor
 
 
-def warmup_gpu(device: str, sample_shape: Tuple[int, ...], use_fp16: bool = False) -> None:
-    """
-    Warm up GPU memory allocator to reduce first-batch allocation overhead.
-    
-    This pre-allocates a small tensor to initialize the CUDA context and
-    memory allocator, reducing latency for the first real batch.
-    
-    Args:
-        device: Target device
-        sample_shape: Shape of sample tensor (without batch dimension)
-        use_fp16: Whether to use FP16 (should match inference dtype)
-    """
-    if device != "cuda":
-        return
-    
-    try:
-        dtype = torch.float16 if use_fp16 else torch.float32
-        _ = torch.zeros((1, *sample_shape), device=device, dtype=dtype)
-        del _
-        torch.cuda.empty_cache()
-    except Exception:
-        # If warmup fails, continue normally
-        pass

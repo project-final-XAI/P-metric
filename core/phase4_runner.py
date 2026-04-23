@@ -34,10 +34,10 @@ class Phase4Runner:
                 logging.error(f"Results directory does not exist: {self.file_manager.results_dir}")
                 return
             
-            datasets = [
+            datasets = sorted(
                 d.name for d in self.file_manager.results_dir.iterdir()
                 if d.is_dir() and not d.name.startswith('.')
-            ]
+            )
             
             if not datasets:
                 logging.error("No result datasets found")
@@ -201,17 +201,9 @@ class Phase4Runner:
 
 def main():
     """Simple main function to run Phase 4."""
-    import sys
-    import logging
-    from pathlib import Path
-    
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-    import config
-    from core.file_manager import FileManager
-    
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    
-    file_manager = FileManager(config.BASE_DIR)
+    from core._bootstrap import bootstrap_runner
+    config, _, file_manager, _, _ = bootstrap_runner()
+
     runner = Phase4Runner(config, file_manager)
     runner.run()
 

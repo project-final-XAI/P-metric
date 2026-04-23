@@ -1,8 +1,10 @@
 from contextlib import nullcontext
-
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from PIL import Image
+from scipy.ndimage import gaussian_filter
 
 import gdown
 import config
@@ -15,9 +17,6 @@ from attribution._shared import DEVICE, get_cached_model
 
 _U2NET_SIZE = (320, 320)
 
-# ImageNet normalization (same as data loader). U-2-Net was trained on RGB in [0, 1],
-# not on normalized tensors — feeding normalized inputs often yields flat ~0 saliency
-# and black heatmaps after visualization.
 _IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406])
 _IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225])
 
@@ -29,7 +28,7 @@ REMOTE_URL = f"https://drive.google.com/uc?id={DRIVE_ID}&export=download"
 
 
 # ---------------------------------------------------------------------------
-# U-2-Net Architecture
+# U-2-Net Architecture (1:1 with user snippet)
 # ---------------------------------------------------------------------------
 
 class REBNCONV(nn.Module):
@@ -71,13 +70,19 @@ class RSU7(nn.Module):
         self.rebnconv1d = REBNCONV(mid_ch * 2, out_ch)
 
     def forward(self, x):
-        hxin = self.rebnconvin(x)
+        hx = x
+        hxin = self.rebnconvin(hx)
         hx1 = self.rebnconv1(hxin)
-        hx2 = self.rebnconv2(self.pool1(hx1))
-        hx3 = self.rebnconv3(self.pool2(hx2))
-        hx4 = self.rebnconv4(self.pool3(hx3))
-        hx5 = self.rebnconv5(self.pool4(hx4))
-        hx6 = self.rebnconv6(self.pool5(hx5))
+        hx = self.pool1(hx1)
+        hx2 = self.rebnconv2(hx)
+        hx = self.pool2(hx2)
+        hx3 = self.rebnconv3(hx)
+        hx = self.pool3(hx3)
+        hx4 = self.rebnconv4(hx)
+        hx = self.pool4(hx4)
+        hx5 = self.rebnconv5(hx)
+        hx = self.pool5(hx5)
+        hx6 = self.rebnconv6(hx)
         hx7 = self.rebnconv7(hx6)
         hx6d = self.rebnconv6d(torch.cat((hx7, hx6), 1))
         hx5d = self.rebnconv5d(torch.cat((_upsample_like(hx6d, hx5), hx5), 1))
@@ -235,12 +240,18 @@ class U2NET(nn.Module):
         self.outconv = nn.Conv2d(6 * out_ch, out_ch, 1)
 
     def forward(self, x):
-        hx1 = self.stage1(x)
-        hx2 = self.stage2(self.pool12(hx1))
-        hx3 = self.stage3(self.pool23(hx2))
-        hx4 = self.stage4(self.pool34(hx3))
-        hx5 = self.stage5(self.pool45(hx4))
-        hx6 = self.stage6(self.pool56(hx5))
+        hx = x
+        hx1 = self.stage1(hx)
+        hx = self.pool12(hx1)
+        hx2 = self.stage2(hx)
+        hx = self.pool23(hx2)
+        hx3 = self.stage3(hx)
+        hx = self.pool34(hx3)
+        hx4 = self.stage4(hx)
+        hx = self.pool45(hx4)
+        hx5 = self.stage5(hx)
+        hx = self.pool56(hx5)
+        hx6 = self.stage6(hx)
 
         hx5d = self.stage5d(torch.cat((_upsample_like(hx6, hx5), hx5), 1))
         hx4d = self.stage4d(torch.cat((_upsample_like(hx5d, hx4), hx4), 1))
@@ -256,7 +267,7 @@ class U2NET(nn.Module):
         d6 = _upsample_like(self.side6(hx6), d1)
 
         d0 = self.outconv(torch.cat((d1, d2, d3, d4, d5, d6), 1))
-        return torch.sigmoid(d0), d1, d2, d3, d4, d5, d6
+        return torch.sigmoid(d0)
 
 
 # ---------------------------------------------------------------------------
@@ -293,20 +304,56 @@ class U2NetSaliencyMethod(ModelIndependentMethod):
         B, C, H, W = images.shape
         u2net = self._get_u2net()
 
+        # The dataloader gives us images already ImageNet-normalized.
+        # To perfectly match the exact input preprocessing of the pure-PyTorch snippet,
+        # we reverse the normalization to get an RGB [0,1] image, convert to uint8, and run its pipeline.
         mean = _IMAGENET_MEAN.to(device=images.device, dtype=images.dtype).view(1, 3, 1, 1)
         std = _IMAGENET_STD.to(device=images.device, dtype=images.dtype).view(1, 3, 1, 1)
         rgb01 = (images * std + mean).clamp(0, 1)
-        img_input = F.interpolate(rgb01, size=_U2NET_SIZE, mode="bilinear", align_corners=False)
 
-        # Phase 1 wraps attribution in autocast(float16). U-2-Net + BatchNorm in fp16 often
-        # yields nearly flat saliency; _save_heatmap_png then maps min==max to all zeros (black).
+        heatmaps = []
         _no_amp = (
             torch.amp.autocast("cuda", enabled=False)
             if images.is_cuda
             else nullcontext()
         )
-        with torch.no_grad(), _no_amp:
-            d0, *_ = u2net(img_input)
-            heatmap = F.interpolate(d0, size=(H, W), mode="bilinear", align_corners=False)
 
-        return self._normalize_attribution(heatmap)
+        for i in range(B):
+            # 1. Convert to uint8 numpy array exactly as the user's snippet inputs expect
+            img_np = (rgb01[i].cpu().permute(1, 2, 0).numpy() * 255.0).astype(np.uint8)
+
+            # 2. Resize and normalize using PIL and numpy as in `run_inference`
+            pil = Image.fromarray(img_np).resize((_U2NET_SIZE[0], _U2NET_SIZE[1]), Image.BILINEAR)
+            inp = np.array(pil, dtype=np.float32) / 255.0
+            
+            mean_np = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+            std_np  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+            inp = (inp - mean_np) / std_np
+            
+            tensor = torch.from_numpy(inp.transpose(2, 0, 1)).unsqueeze(0).to(images.device)
+
+            # 3. Model inference
+            with torch.no_grad(), _no_amp:
+                pred = u2net(tensor)
+
+            # 4. Extract alpha, map to uint8, and resize back
+            alpha = pred.squeeze().cpu().numpy()  # (320, 320)
+            
+            alpha_img = Image.fromarray((alpha * 255).astype(np.uint8))
+            alpha_resized = np.array(
+                alpha_img.resize((W, H), Image.BILINEAR), dtype=np.float64
+            ) / 255.0
+
+            # 5. generate_heatmap logic exactly as requested
+            heatmap_np = alpha_resized.copy()
+            heatmap_np = gaussian_filter(heatmap_np, sigma=1.5)
+            h_min, h_max = heatmap_np.min(), heatmap_np.max()
+            if h_max > h_min:
+                heatmap_np = (heatmap_np - h_min) / (h_max - h_min)
+            else:
+                heatmap_np[:] = 0.0
+
+            heatmaps.append(torch.from_numpy(heatmap_np).to(device=images.device, dtype=images.dtype).unsqueeze(0))
+
+        # Stack into shape (B, 1, H, W)
+        return torch.stack(heatmaps, dim=0)

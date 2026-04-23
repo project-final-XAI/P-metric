@@ -11,7 +11,16 @@ import subprocess
 import logging
 from typing import Dict, Optional
 
-from core.gpu_utils import get_memory_usage, clear_cache_if_needed, sync_and_clear
+from core.gpu_utils import get_memory_usage
+
+try:
+    import config as _cfg
+except ImportError:
+    _cfg = None
+
+_VRAM_HIGH = getattr(_cfg, 'VRAM_TIER_HIGH', 22)
+_VRAM_MID = getattr(_cfg, 'VRAM_TIER_MID', 16)
+_VRAM_LOW = getattr(_cfg, 'VRAM_TIER_LOW', 8)
 
 
 class GPUManager:
@@ -113,13 +122,11 @@ class GPUManager:
         
         # Scale based on GPU memory, but keep batch_size=1 methods unchanged
         # Methods like C3F require batch_size=1 and should not be scaled
-        if self.gpu_memory_gb >= 22:
-            # High-VRAM GPUs can handle 2x base sizes
+        if self.gpu_memory_gb >= _VRAM_HIGH:
             return {k: (v if v == 1 else int(v * 2.0)) for k, v in base_sizes.items()}
-        elif self.gpu_memory_gb > 16:
-            # Mid-VRAM GPUs can handle 1.5x base sizes
+        elif self.gpu_memory_gb > _VRAM_MID:
             return {k: (v if v == 1 else int(v * 1.5)) for k, v in base_sizes.items()}
-        elif self.gpu_memory_gb > 8:
+        elif self.gpu_memory_gb > _VRAM_LOW:
             # Standard GPUs use base sizes
             return base_sizes
         else:
@@ -162,11 +169,11 @@ class GPUManager:
             Optimal batch size (adjusted for all factors)
         """
         # Base batch sizes by total GPU memory
-        if self.gpu_memory_gb >= 22:
-            base_size = 512   # Very high-VRAM GPUs
-        elif self.gpu_memory_gb >= 16:
-            base_size = 384   # High-VRAM GPUs
-        elif self.gpu_memory_gb > 8:
+        if self.gpu_memory_gb >= _VRAM_HIGH:
+            base_size = 512
+        elif self.gpu_memory_gb >= _VRAM_MID:
+            base_size = 384
+        elif self.gpu_memory_gb > _VRAM_LOW:
             base_size = 256   # Mid-VRAM GPUs
         else:
             base_size = 64    # Low-VRAM GPUs
@@ -176,7 +183,7 @@ class GPUManager:
         
         # Apply memory pressure adjustment (using lookup table)
         if current_memory_usage is None:
-            _, current_memory_usage = self.get_memory_usage()
+            _, current_memory_usage = get_memory_usage()
         
         # If VRAM is full (95%+), reduce significantly  
         if current_memory_usage >= 95.0:

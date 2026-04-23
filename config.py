@@ -52,6 +52,22 @@ PHASE2_SAVE_WORKERS = 8  # Number of workers for parallel image saving (CPU)
 PHASE3_BATCH_SIZE_PYTORCH = 512  # Batch size for Phase 3 PyTorch model evaluation (GPU) - increased for better GPU utilization
 PHASE3_BATCH_SIZE_LLM = 1  # Batch size for Phase 3 LLM model evaluation (CPU/API) - smaller batches = continuous processing, no gaps
 PHASE3_LOAD_WORKERS = 8  # Number of workers for parallel image loading in Phase 3
+PHASE3_SAVE_INTERVAL_ITEMS = 50   # Checkpoint to CSV after this many new results
+PHASE3_SAVE_INTERVAL_SECONDS = 120  # … or after this many seconds, whichever comes first
+PHASE3_LLM_BATCH_TIMEOUT = 300   # Per-batch timeout (seconds) for LLM judges
+PHASE3_PREFETCH_AHEAD = 3        # Prefetch depth for PyTorch evaluation pipeline
+PHASE3_LLM_MAX_WORKERS = 4       # Max parallel workers for LLM batch evaluation
+
+# Input image size for occlusion masks (must match the dataloader transform)
+OCCLUSION_IMAGE_SHAPE = (224, 224)
+
+# -----------------
+# GPU VRAM Tier Thresholds (GB)
+# -----------------
+# Used by GPUManager to scale batch sizes based on available GPU memory.
+VRAM_TIER_HIGH = 22    # >= this: "very high" tier
+VRAM_TIER_MID = 16     # >= this: "high" tier
+VRAM_TIER_LOW = 8      # >= this: "standard" tier; below: "low" tier
 
 # -----------------
 # Performance Optimization
