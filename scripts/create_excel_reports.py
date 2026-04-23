@@ -10,10 +10,31 @@ import pandas as pd
 from pathlib import Path
 import logging
 from openpyxl.chart import LineChart, Reference
+from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, PatternFill, Alignment
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def _drop_at_75_score(method_df: pd.DataFrame) -> float:
+    """Single ranking rule: higher DROP@75 => stronger faithfulness."""
+    if method_df.empty:
+        return float("-inf")
+
+    level_col = "occlusion_level"
+    acc_col = "mean_accuracy"
+    base_level = method_df[level_col].min()
+    base_acc = method_df.loc[method_df[level_col] == base_level, acc_col].mean()
+
+    # Prefer exact 75%; fallback to nearest available occlusion level.
+    if (method_df[level_col] == 75).any():
+        acc_at_75 = method_df.loc[method_df[level_col] == 75, acc_col].mean()
+    else:
+        nearest_idx = (method_df[level_col] - 75).abs().idxmin()
+        acc_at_75 = float(method_df.loc[nearest_idx, acc_col])
+
+    return float(base_acc - acc_at_75)
 
 
 def create_excel_with_chart(
@@ -48,6 +69,12 @@ def create_excel_with_chart(
         
     # Reorder DataFrame: Method column first, then sorted occlusion levels
     pivot_df = pivot_df[['attribution_method'] + occlusion_cols]
+
+    # Sort methods by one rule only: DROP@75 (higher is better).
+    rank_series = df.groupby('attribution_method').apply(_drop_at_75_score)
+
+    pivot_df["_sort_score"] = pivot_df['attribution_method'].map(rank_series).fillna(-1.0)
+    pivot_df = pivot_df.sort_values("_sort_score", ascending=False).drop(columns=["_sort_score"])
     
     num_rows = len(pivot_df) + 1  # +1 for header
     num_cols = len(pivot_df.columns)
@@ -68,6 +95,18 @@ def create_excel_with_chart(
             cell.fill = header_fill
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        # Color-scale the accuracy values (red=low, yellow=mid, green=high)
+        if num_rows >= 2 and num_cols >= 2:
+            value_range = f"B2:{get_column_letter(num_cols)}{num_rows}"
+            worksheet.conditional_formatting.add(
+                value_range,
+                ColorScaleRule(
+                    start_type='num', start_value=0.0, start_color='F8696B',
+                    mid_type='num', mid_value=0.5, mid_color='FFEB84',
+                    end_type='num', end_value=1.0, end_color='63BE7B'
+                )
+            )
         
         # Auto-adjust column widths
         for column in worksheet.columns:

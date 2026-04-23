@@ -8,8 +8,11 @@ from pathlib import Path
 # ==========================================
 DATASET = "imagenet"
 METHODS_TO_CLEAR = [
-    "U2Net-Saliency",
-    "u2net_dino_fusion",
+    "sumDino",
+    "c3f",
+    "dinov2_ENT",
+    "dinov2_PC_L2",
+    "dinov2_PC_EV",
 ]
 INCLUDE_EVALUATION = True  # Set to True to delete evaluation CSVs
 DRY_RUN = False  # Set to False to actually delete files

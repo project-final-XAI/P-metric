@@ -147,7 +147,7 @@ ATTRIBUTION_METHODS = [
     # --- Model-dependent (need the classifier) ---
     "saliency",
     "inputxgradient",
-    # "smoothgrad",
+    # "smoothgrad", cause problems with hardware
     "guided_backprop",
     "integrated_gradients",
     "occlusion",
