@@ -52,10 +52,10 @@ PHASE2_SAVE_WORKERS = 8  # Number of workers for parallel image saving (CPU)
 PHASE3_BATCH_SIZE_PYTORCH = 512  # Batch size for Phase 3 PyTorch model evaluation (GPU) - increased for better GPU utilization
 PHASE3_BATCH_SIZE_LLM = 1  # Batch size for Phase 3 LLM model evaluation (CPU/API) - smaller batches = continuous processing, no gaps
 PHASE3_LOAD_WORKERS = 8  # Number of workers for parallel image loading in Phase 3
-PHASE3_SAVE_INTERVAL_ITEMS = 50   # Checkpoint to CSV after this many new results
-PHASE3_SAVE_INTERVAL_SECONDS = 120  # … or after this many seconds, whichever comes first
+PHASE3_SAVE_INTERVAL_ITEMS = 200   # Checkpoint to CSV after this many new results
+PHASE3_SAVE_INTERVAL_SECONDS = 500  # … or after this many seconds, whichever comes first
 PHASE3_LLM_BATCH_TIMEOUT = 300   # Per-batch timeout (seconds) for LLM judges
-PHASE3_PREFETCH_AHEAD = 3        # Prefetch depth for PyTorch evaluation pipeline
+PHASE3_PREFETCH_AHEAD = 8        # Prefetch depth for PyTorch evaluation pipeline (uint8 batches are tiny, larger queue keeps the GPU fed)
 PHASE3_LLM_MAX_WORKERS = 4       # Max parallel workers for LLM batch evaluation
 
 # Input image size for occlusion masks (must match the dataloader transform)
@@ -104,36 +104,36 @@ DATASET_CONFIG = {
 }
 
 # Current dataset to use
-DATASET_NAME = "imagenet"
-# DATASET_NAME = "SIPaKMeD_cropped"
+# DATASET_NAME = "imagenet"
+DATASET_NAME = "SIPaKMeD_cropped"
 
 # -----------------
 # Model Configuration
 # -----------------
 # Models used for generating attribution heatmaps (Phase 1)
 GENERATING_MODELS = [
-    "resnet50",
-    "mobilenet_v2",
-    "vgg16",
+    # "resnet50",
+    # "mobilenet_v2",
+    # "vgg16",
 
     # "vit_b_16",
     # "swin_t",
 
-    # "sipakmed_cropped_efficientnet.pth",
-    # "sipakmed_cropped_ResNet50.pth",
+    "sipakmed_cropped_efficientnet.pth",
+    "sipakmed_cropped_ResNet50.pth",
 ]
 
 # Models used for evaluating occluded images (Phase 2)
 JUDGING_MODELS = [
-    "resnet50",
-    "mobilenet_v2",
-    "vgg16",
+    # "resnet50",
+    # "mobilenet_v2",
+    # "vgg16",
 
     # "vit_b_16",
     # "swin_t",
 
-    # "sipakmed_cropped_efficientnet.pth",
-    # "sipakmed_cropped_ResNet50.pth",
+    "sipakmed_cropped_efficientnet.pth",
+    "sipakmed_cropped_ResNet50.pth",
 
     # "llama3.2-vision-binary",
     # "llama3.2-vision-cosine",
@@ -147,7 +147,7 @@ ATTRIBUTION_METHODS = [
     # --- Model-dependent (need the classifier) ---
     "saliency",
     "inputxgradient",
-    # "smoothgrad", cause problems with hardware
+            # "smoothgrad", cause problems with hardware
     "guided_backprop",
     "integrated_gradients",
     "occlusion",
@@ -167,10 +167,12 @@ ATTRIBUTION_METHODS = [
     "dinov2_COMBO_ENT_SMOOTH",
     "U2Net-Saliency",
     "u2net_dino_fusion",
+    "u2net_dino_product",
+    # "dinov2_COMBO_ENT_SMOOTH_U2_TOP3",
 
     # --- Continuous wrappers ---
     # "saliency_continuous",
-    "inputxgradient_continuous",
+    # "inputxgradient_continuous",
     # "guided_backprop_continuous",
     # "integrated_gradients_continuous",
     # "gradientshap_continuous",
@@ -184,7 +186,7 @@ ATTRIBUTION_METHODS = [
 
     # --- U2Net underlay + XAI fill ---
     # "saliency_u2net_fill",
-    "inputxgradient_u2net_fill",
+    # "inputxgradient_u2net_fill",
     # "guided_backprop_u2net_fill",
     # "integrated_gradients_u2net_fill",
     # "gradientshap_u2net_fill",
@@ -210,7 +212,6 @@ DINO_ATTN_IMPLEMENTATION = "eager"
 # -----------------
 # Occlusion levels (percentages) to evaluate
 OCCLUSION_LEVELS = list[int](range(0, 105, 5))
-# OCCLUSION_LEVELS =  [20, 40, 60, 80, 95,100]
 
 # Fill strategies for occluded pixels
 FILL_STRATEGIES = [

@@ -58,9 +58,10 @@ class Phase4Runner:
             self._save_results(agg_df, metrics_df)
             self._generate_plots(agg_df, datasets)
 
-            # Generate detailed Excel reports (pivot tables + charts)
+            # Generate detailed Excel reports (pivot tables + charts).
+            # Pass the in-memory frame so the disk CSV round-trip is skipped.
             try:
-                create_excel_reports.main()
+                create_excel_reports.main(agg_df=agg_df)
             except Exception as e:
                 logging.warning(f"Failed to generate Excel reports: {e}")
             

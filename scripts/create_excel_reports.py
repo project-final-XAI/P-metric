@@ -161,21 +161,33 @@ def create_excel_with_chart(
     return num_rows
 
 
-def main():
-    """Main function to process CSV and create Excel reports."""
-    # Paths
+def main(agg_df: pd.DataFrame | None = None, output_dir: Path | None = None):
+    """Process aggregated results into Excel reports.
+
+    Args:
+        agg_df: Pre-computed aggregated DataFrame. When omitted (legacy CLI
+            entry-point), the function falls back to reading
+            ``results/analysis/aggregated_accuracy_curves.csv`` from disk so
+            standalone invocations keep working.
+        output_dir: Directory where the ``excel_reports`` folder should live.
+            Defaults to ``<repo>/results``.
+    """
     base_dir = Path(__file__).parent.parent
-    csv_path = base_dir / "results" / "analysis" / "aggregated_accuracy_curves.csv"
-    output_dir = base_dir / "results"
-    
-    if not csv_path.exists():
-        logging.error(f"CSV file not found: {csv_path}")
-        return
-    
-    # Load CSV
-    logging.info(f"Loading CSV: {csv_path}")
-    df = pd.read_csv(csv_path)
-    
+    if output_dir is None:
+        output_dir = base_dir / "results"
+
+    if agg_df is None:
+        csv_path = base_dir / "results" / "analysis" / "aggregated_accuracy_curves.csv"
+        if not csv_path.exists():
+            logging.error(f"CSV file not found: {csv_path}")
+            return
+        logging.info(f"Loading CSV: {csv_path}")
+        df = pd.read_csv(csv_path)
+    else:
+        # Copy to avoid mutating the caller's frame in the column-cleaning
+        # block below (column rename/lower-case).
+        df = agg_df.copy()
+
     # Clean column names (remove spaces)
     df.columns = df.columns.str.strip()
     

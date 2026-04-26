@@ -4,11 +4,19 @@ Plot generation utilities for experiment results.
 Handles creation of accuracy degradation curves and other visualizations.
 """
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 import logging
-import matplotlib.pyplot as plt
-import pandas as pd
-import seaborn as sns
+import os
+
+import matplotlib
+
+# Force the non-interactive Agg backend so this module is safe to import in
+# child processes spawned by ProcessPoolExecutor on any OS.
+matplotlib.use("Agg", force=True)
+import matplotlib.pyplot as plt  # noqa: E402  (import after backend select)
+import pandas as pd  # noqa: E402
+import seaborn as sns  # noqa: E402
 
 
 def _drop_at_75_score(method_df: pd.DataFrame, x_col: str, y_col: str) -> float:
@@ -28,75 +36,139 @@ def _drop_at_75_score(method_df: pd.DataFrame, x_col: str, y_col: str) -> float:
     return float(base_acc - acc_at_75)
 
 
+def _render_curve_group(
+    group_df: pd.DataFrame,
+    output_path: Path,
+    gen_model: str,
+    judge_model: str,
+    fill_strat: str,
+    x_col: str,
+    y_col: str,
+    hue_col: str,
+) -> str:
+    """Render a single accuracy-degradation figure to ``output_path``.
+
+    Top-level so it pickles cleanly for ProcessPoolExecutor on Windows
+    (spawn-based child processes).
+    """
+    plt.figure(figsize=(12, 8))
+    sns.set_theme(style="whitegrid")
+
+    rank_series = group_df.groupby(hue_col).apply(
+        lambda d: _drop_at_75_score(d, x_col=x_col, y_col=y_col),
+        include_groups=False
+    )
+    hue_order = rank_series.sort_values(ascending=False).index.tolist()
+    palette = sns.color_palette("viridis", n_colors=len(hue_order))
+
+    sns.lineplot(
+        data=group_df,
+        x=x_col,
+        y=y_col,
+        hue=hue_col,
+        hue_order=hue_order,
+        palette=palette,
+        marker="o",
+        linewidth=2.5,
+    )
+
+    x_min = group_df[x_col].min()
+    x_max = group_df[x_col].max()
+    x_range = x_max - x_min
+    x_padding = max(2, x_range * 0.02)
+
+    plt.title(
+        f"Accuracy Degradation\nGenerator: {gen_model} | Judge: {judge_model} | Fill: {fill_strat}",
+        fontsize=16,
+    )
+    plt.xlabel("Percentage of Pixels Removed (%)", fontsize=12)
+    plt.ylabel("Top-1 Accuracy", fontsize=12)
+    plt.ylim(-0.05, 1.05)
+    plt.xlim(x_min - x_padding, x_max + x_padding)
+    plt.legend(title=hue_col.replace("_", " ").title())
+
+    plt.savefig(output_path, bbox_inches="tight", dpi=100)
+    plt.close()
+    return str(output_path)
+
+
+def _resolve_plot_workers() -> int:
+    """Pick a sensible default for the plot ProcessPool worker count."""
+    env = os.environ.get("PHASE4_PLOT_WORKERS")
+    if env:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            pass
+    cpu = os.cpu_count() or 1
+    return max(1, min(cpu - 1, 8))
+
+
 def plot_accuracy_degradation_curves(
     results_df: pd.DataFrame,
     output_dir: Path,
     x_col: str = "occlusion_level",
     y_col: str = "mean_accuracy",
-    hue_col: str = "attribution_method"
+    hue_col: str = "attribution_method",
+    max_workers: int | None = None,
 ):
+    """Generate and save accuracy-degradation plots in parallel.
+
+    One figure per ``(generating_model, judging_model, fill_strategy)`` group is
+    rendered concurrently using :class:`concurrent.futures.ProcessPoolExecutor`
+    with the matplotlib ``Agg`` backend (process-safe). Set
+    ``PHASE4_PLOT_WORKERS`` in the environment to override the default worker
+    count; pass ``max_workers=1`` to fall back to sequential rendering for
+    debugging.
     """
-    Generate and save plots of accuracy degradation curves.
-    
-    Creates separate plots for each combination of generating model,
-    judging model, and fill strategy, showing how accuracy degrades
-    as pixels are progressively occluded.
-    
-    Args:
-        results_df: DataFrame containing aggregated results
-        output_dir: Directory to save plots
-        x_col: Column name for x-axis (occlusion level)
-        y_col: Column name for y-axis (mean accuracy)
-        hue_col: Column name to differentiate curves by color
-    """
-    # Create unique plot for each combination
     group_cols = ["generating_model", "judging_model", "fill_strategy"]
-    
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Collect (group_df, output_path, *names) tuples first so we can either
+    # parallelise or run inline depending on the requested worker count.
+    jobs = []
     for name, group_df in results_df.groupby(group_cols):
         gen_model, judge_model, fill_strat = name
-        
-        plt.figure(figsize=(12, 8))
-        sns.set_theme(style="whitegrid")
-
-        # Keep one consistent ordering rule: higher DROP@75 first.
-        rank_series = group_df.groupby(hue_col).apply(
-            lambda d: _drop_at_75_score(d, x_col=x_col, y_col=y_col)
-        )
-        hue_order = rank_series.sort_values(ascending=False).index.tolist()
-        palette = sns.color_palette("viridis", n_colors=len(hue_order))
-        
-        plot = sns.lineplot(
-            data=group_df,
-            x=x_col,
-            y=y_col,
-            hue=hue_col,
-            hue_order=hue_order,
-            palette=palette,
-            marker='o',
-            linewidth=2.5
-        )
-        
-        # Calculate dynamic x-axis range from actual data
-        x_min = group_df[x_col].min()
-        x_max = group_df[x_col].max()
-        x_range = x_max - x_min
-        x_padding = max(2, x_range * 0.02)  # At least 2% padding, or 2 units
-        
-        plt.title(
-            f"Accuracy Degradation\nGenerator: {gen_model} | Judge: {judge_model} | Fill: {fill_strat}",
-            fontsize=16
-        )
-        plt.xlabel("Percentage of Pixels Removed (%)", fontsize=12)
-        plt.ylabel("Top-1 Accuracy", fontsize=12)
-        plt.ylim(-0.05, 1.05)
-        plt.xlim(x_min - x_padding, x_max + x_padding)
-        plt.legend(title=hue_col.replace('_', ' ').title())
-        
         filename = f"{gen_model}_{judge_model}_{fill_strat}.png"
         output_path = output_dir / filename
-        plt.savefig(output_path, bbox_inches='tight', dpi=100)
-        plt.close()
-        logging.info(f"Saved plot: {output_path}")
+        jobs.append(
+            (group_df.copy(), output_path, gen_model, judge_model, fill_strat)
+        )
+
+    if not jobs:
+        return
+
+    if max_workers is None:
+        max_workers = _resolve_plot_workers()
+    max_workers = max(1, min(max_workers, len(jobs)))
+
+    if max_workers == 1:
+        for group_df, output_path, gen_model, judge_model, fill_strat in jobs:
+            _render_curve_group(
+                group_df, output_path, gen_model, judge_model, fill_strat,
+                x_col, y_col, hue_col,
+            )
+            logging.info(f"Saved plot: {output_path}")
+        return
+
+    with ProcessPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(
+                _render_curve_group,
+                group_df, output_path, gen_model, judge_model, fill_strat,
+                x_col, y_col, hue_col,
+            ): output_path
+            for group_df, output_path, gen_model, judge_model, fill_strat in jobs
+        }
+        for fut in as_completed(futures):
+            output_path = futures[fut]
+            try:
+                fut.result()
+                logging.info(f"Saved plot: {output_path}")
+            except Exception as e:
+                logging.error(f"Plot rendering failed for {output_path}: {e}")
 
 
 def plot_fill_strategy_comparison(

@@ -41,10 +41,11 @@ from attribution.model_independent.dinov2_methods import (
     Dinov2ComboFixedMethod,
     Dinov2ComboEntropyMethod,
     Dinov2ComboEntSmoothMethod,
+    Dinov2ComboEntSmoothU2Top3Method,
 )
 from attribution.model_independent.unet_based import U2NetSaliencyMethod
 from attribution.model_independent.unet_dino import U2NetDinoFusionMethod
-
+from attribution.model_independent.unet_dino import U2NetDinoProductMethod
 # --- Category 3: Continuous wrappers ---------------------------------------
 from attribution.continuous import ContinuousWrapper, U2NetUnderlayFillWrapper
 
@@ -76,8 +77,10 @@ METHOD_REGISTRY = {
     "dinov2_COMBO_FIXED": Dinov2ComboFixedMethod(),
     "dinov2_ENT": Dinov2ComboEntropyMethod(),
     "dinov2_COMBO_ENT_SMOOTH": Dinov2ComboEntSmoothMethod(),
+    "dinov2_COMBO_ENT_SMOOTH_U2_TOP3": Dinov2ComboEntSmoothU2Top3Method(),
     "U2Net-Saliency": U2NetSaliencyMethod(),
     "u2net_dino_fusion": U2NetDinoFusionMethod(),
+    "u2net_dino_product": U2NetDinoProductMethod(),
 
     # --- Continuous wrappers -----------------------------------------------
     "saliency_continuous": ContinuousWrapper(SaliencyMethod(), sigma=2.0),

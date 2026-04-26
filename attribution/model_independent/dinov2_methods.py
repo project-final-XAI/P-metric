@@ -39,6 +39,7 @@ except ImportError as exc:
 import config
 from attribution.base import ModelIndependentMethod
 from attribution._shared import DEVICE, get_cached_model
+from attribution.model_independent.unet_based import U2NetSaliencyMethod
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +48,7 @@ from attribution._shared import DEVICE, get_cached_model
 
 _DINO_MODEL_NAME = getattr(config, "DINO_MODEL_NAME", "facebook/dinov2-with-registers-base")
 _PATCH_SIZE = 14
-_ATTN_IMAGE_SIZE = (518, 518)   # 518 = 14 × 37 — optimal for DINOv2 patch grid
+_ATTN_IMAGE_SIZE = (224, 224)   # Unified with classifier pipeline; 224 = 14 × 16
 _IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _IMAGENET_STD  = (0.229, 0.224, 0.225)
 
@@ -420,6 +421,59 @@ def _scores_combo_entropy(attn: np.ndarray, pc1: np.ndarray) -> np.ndarray:
     return (w_attn * attn + w_pc1 * pc1).astype(np.float32)
 
 
+def _normalize_scores(scores: np.ndarray) -> np.ndarray:
+    """Normalize a score vector to [0, 1]."""
+    lo, hi = scores.min(), scores.max()
+    if hi - lo > 1e-8:
+        return ((scores - lo) / (hi - lo)).astype(np.float32)
+    return np.zeros_like(scores, dtype=np.float32)
+
+
+def _select_pc_by_u2net(
+    fwd: dict,
+    u2_scores: np.ndarray,
+    n_components: int,
+    metric: str,
+) -> np.ndarray:
+    """Select the best PC (from top-k) by similarity to a U2Net reference map."""
+    patch_tokens = fwd["patch_tokens"]
+    cls_token = fwd["cls_token"]
+
+    feat = patch_tokens.cpu().numpy().astype(np.float32)
+    feat -= feat.mean(axis=0, keepdims=True)
+
+    n_comp = min(n_components, feat.shape[0], feat.shape[1])
+    if n_comp < 1:
+        return np.zeros_like(u2_scores, dtype=np.float32)
+
+    pcs = PCA(n_components=n_comp, whiten=False).fit_transform(feat)
+    ref = _normalize_scores(u2_scores.astype(np.float32))
+
+    metric_name = metric.lower()
+    if metric_name not in {"pearson", "dot"}:
+        metric_name = "dot"
+
+    best_score = -np.inf
+    best_map = None
+    for k in range(n_comp):
+        comp = _fix_polarity_cls(pcs[:, k].copy(), patch_tokens, cls_token)
+        comp_n = _normalize_scores(comp)
+
+        if metric_name == "dot":
+            score = float(np.dot(comp_n, ref))
+        else:
+            c = np.corrcoef(comp_n, ref)[0, 1]
+            score = float(c) if np.isfinite(c) else -np.inf
+
+        if score > best_score:
+            best_score = score
+            best_map = comp_n
+
+    if best_map is None:
+        return np.zeros_like(ref, dtype=np.float32)
+    return best_map.astype(np.float32)
+
+
 # ---------------------------------------------------------------------------
 # Output formatting
 # ---------------------------------------------------------------------------
@@ -719,3 +773,76 @@ class Dinov2ComboEntSmoothMethod(Dinov2AllMethodsBase):
             scores = np.zeros_like(scores)
 
         return scores
+
+
+class Dinov2ComboEntSmoothU2Top3Method(Dinov2AllMethodsBase):
+    """ComboEntSmooth variant with PC selected from top-3 via U2Net matching."""
+
+    def __init__(
+        self,
+        sigma: float = 2.0,
+        gamma: float = 0.7,
+        alpha: float = 0.45,
+        metric: str = "dot",
+    ) -> None:
+        super().__init__("dinov2_combo_ent_smooth_u2top3")
+        self.sigma = sigma
+        self.gamma = gamma
+        self.alpha = alpha
+        self.metric = getattr(config, "DINO_U2NET_PC_MATCH_METRIC", metric)
+        self.top_k = int(getattr(config, "DINO_U2NET_PC_TOPK", 3))
+        self._u2net = U2NetSaliencyMethod()
+
+    def _scores_from_fwd(self, fwd: dict, pc_base: np.ndarray) -> np.ndarray:
+        # `pc_base` is not used in this method; PC is selected via U2Net match.
+        return pc_base
+
+    def _u2net_patch_scores(self, img_pil: Image.Image, grid_h: int, grid_w: int) -> np.ndarray:
+        img_np = np.asarray(img_pil.convert("RGB"), dtype=np.float32) / 255.0
+        img_t = torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0).to(DEVICE)
+        mean = torch.tensor(_IMAGENET_MEAN, dtype=img_t.dtype, device=DEVICE).view(1, 3, 1, 1)
+        std = torch.tensor(_IMAGENET_STD, dtype=img_t.dtype, device=DEVICE).view(1, 3, 1, 1)
+        img_t = (img_t - mean) / std
+
+        with torch.no_grad():
+            u2 = self._u2net.compute_independent(img_t)  # (1, 1, H, W)
+
+        u2 = F.interpolate(u2, size=(grid_h, grid_w), mode="bilinear", align_corners=False)
+        return u2.reshape(-1).detach().cpu().numpy().astype(np.float32)
+
+    def _heatmap_single(self, img_pil: Image.Image) -> np.ndarray:
+        fwd = _forward_once(self._get_model(), img_pil)
+
+        attn = _scores_attn(fwd)  # (N,), [0,1]
+        u2_scores = self._u2net_patch_scores(img_pil, fwd["grid_h"], fwd["grid_w"])
+        pc_selected = _select_pc_by_u2net(
+            fwd=fwd,
+            u2_scores=u2_scores,
+            n_components=max(1, self.top_k),
+            metric=self.metric,
+        )
+
+        # Same pipeline as Dinov2ComboEntSmoothMethod, but with selected PC.
+        base = _scores_combo_entropy(attn, pc_selected)
+        hm = torch.from_numpy(base).float().reshape(1, 1, fwd["grid_h"], fwd["grid_w"]).to(DEVICE)
+
+        if self.sigma > 0:
+            half = math.ceil(3.0 * self.sigma)
+            ksize = 2 * half + 1
+            coords = torch.arange(ksize, dtype=torch.float32, device=DEVICE) - half
+            g = torch.exp(-(coords ** 2) / (2.0 * self.sigma ** 2))
+            g = g / g.sum()
+            kernel = torch.outer(g, g)
+            kernel = (kernel / kernel.sum()).view(1, 1, ksize, ksize)
+            hm = F.conv2d(hm, kernel, padding=half)
+
+        lo, hi = hm.min(), hm.max()
+        hm = (hm - lo) / (hi - lo + 1e-8) if (hi - lo).abs() > 1e-8 else torch.zeros_like(hm)
+
+        pc_map = torch.from_numpy(pc_selected).float().reshape(1, 1, fwd["grid_h"], fwd["grid_w"]).to(DEVICE)
+        gated = hm * (pc_map ** self.gamma)
+        hm = self.alpha * gated + (1.0 - self.alpha) * hm
+
+        scores = hm.reshape(-1).cpu().numpy().astype(np.float32)
+        scores = _normalize_scores(scores)
+        return _to_output_tensor(scores, fwd["grid_h"], fwd["grid_w"], fwd["H_orig"], fwd["W_orig"])

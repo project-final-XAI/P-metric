@@ -13,10 +13,10 @@ from config import DATASET_CONFIG, MAX_WORKERS
 
 
 def get_default_transforms() -> transforms.Compose:
-    """Standard ImageNet transforms for model compatibility."""
+    """Standard transforms for model compatibility without center cropping."""
     return transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
+        # TODO: verify what is the correct approach. the old one was resize(256).crop(224) and now is resize(224)
+        transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                              std=[0.229, 0.224, 0.225]),
