@@ -39,3 +39,7 @@ class U2NetUnderlayFillWrapper(AttributionMethod):
 
         fused = underlay + (1.0 - underlay) * fill
         return self._normalize_attribution(fused.unsqueeze(1)).squeeze(1)
+
+    def _compute_raw(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError("U2NetUnderlayFillWrapper is a wrapper; use compute() directly.")
+

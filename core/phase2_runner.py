@@ -122,8 +122,12 @@ class Phase2Runner:
 
         if missing_items:
             logging.info(f"Running Phase 1 for {len(missing_items)} missing combinations...")
-            phase1 = Phase1Runner(self.config, self.gpu_manager, self.file_manager, self.model_cache)
-            phase1.run(get_cached_model_func)
+            from data.loader import get_dataset_handler
+            from models.loader import get_model_provider
+            dataset_handler = get_dataset_handler(self.config.DATASET_NAME)
+            model_provider = get_model_provider(self.config.DATASET_NAME)
+            phase1 = Phase1Runner(self.config, self.gpu_manager, self.file_manager, dataset_handler, model_provider)
+            phase1.run()
 
     # ------------------------------------------------------------------
     # Dataset loading

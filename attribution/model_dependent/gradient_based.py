@@ -8,53 +8,45 @@ Includes:
 """
 
 import torch
-import torch.nn as nn
 from attribution.base import AttributionMethod
 from captum.attr import Saliency, InputXGradient, NoiseTunnel
 
 
 class SaliencyMethod(AttributionMethod):
     """Saliency attribution using vanilla gradients."""
-    
+
     def __init__(self):
         super().__init__("saliency")
-        
-    def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """Compute saliency attribution."""
+
+    def _compute_raw(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         saliency = Saliency(model)
-        attribution = saliency.attribute(images, target=targets)
-        return self._normalize_attribution(attribution)
+        return saliency.attribute(images, target=targets)
 
 
 class InputXGradientMethod(AttributionMethod):
     """Input × Gradient attribution."""
-    
+
     def __init__(self):
         super().__init__("inputxgradient")
-        
-    def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """Compute Input × Gradient attribution."""
+
+    def _compute_raw(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         ixg = InputXGradient(model)
-        attribution = ixg.attribute(images, target=targets)
-        return self._normalize_attribution(attribution)
+        return ixg.attribute(images, target=targets)
 
 
 class SmoothGradMethod(AttributionMethod):
     """SmoothGrad attribution using noisy gradients."""
-    
+
     def __init__(self):
         super().__init__("smoothgrad")
-        
-    def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """Compute SmoothGrad attribution."""
+
+    def _compute_raw(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         saliency = Saliency(model)
         nt = NoiseTunnel(saliency)
-        attribution = nt.attribute(
-            images, 
+        return nt.attribute(
+            images,
             target=targets,
             nt_type='smoothgrad',
             nt_samples=10,
-            stdevs=0.1
+            stdevs=0.1,
         )
-        return self._normalize_attribution(attribution)
-
