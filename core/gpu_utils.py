@@ -8,7 +8,7 @@ code is centralized here for better readability and maintainability.
 
 import torch
 import logging
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 
 def get_memory_usage() -> Tuple[float, float]:
@@ -67,7 +67,7 @@ def sync_and_clear() -> None:
 
 
 def prepare_batch_tensor(
-    images: List[torch.Tensor],
+    images: Union[List[torch.Tensor], torch.Tensor],
     device: str,
     use_fp16: bool = False,
     memory_format: Optional[torch.memory_format] = None
@@ -81,7 +81,7 @@ def prepare_batch_tensor(
     - FP16 conversion if supported
     
     Args:
-        images: List of image tensors (each C, H, W)
+        images: List of image tensors (each C, H, W) or an existing batch (B, C, H, W)
         device: Target device
         use_fp16: Whether to convert to FP16 (faster inference on modern GPUs)
         memory_format: Optional memory format optimization
@@ -89,15 +89,16 @@ def prepare_batch_tensor(
     Returns:
         Batch tensor of shape (B, C, H, W)
     """
-    if device == "cuda":
-        # Check if images are already on GPU - stack directly if so
-        if all(img.device.type == "cuda" for img in images):
-            batch_tensor = torch.stack(images)
-        else:
-            # Transfer with non-blocking for better pipelining
-            batch_tensor = torch.stack(images).to(device, non_blocking=True)
+    if isinstance(images, torch.Tensor):
+        batch_tensor = images.unsqueeze(0) if images.ndim == 3 else images
+    elif device == "cuda" and all(img.device.type == "cuda" for img in images):
+        batch_tensor = torch.stack(images)
     else:
-        batch_tensor = torch.stack(images).to(device)
+        batch_tensor = torch.stack(images)
+
+    if batch_tensor.device.type != device:
+        non_blocking = device == "cuda"
+        batch_tensor = batch_tensor.to(device, non_blocking=non_blocking)
     
     # Apply memory format optimization (channels_last improves CNN performance)
     if memory_format is not None and batch_tensor.ndim == 4:

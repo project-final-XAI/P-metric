@@ -40,14 +40,16 @@ from attribution.model_independent.dinov2_methods import (
     Dinov2ComboFixedMethod,
     Dinov2ComboEntropyMethod,
     Dinov2ComboEntSmoothMethod,
-    Dinov2TriSignalGuidedMethod,
 )
-from attribution.model_independent.unet_based import U2NetSaliencyMethod
-from attribution.model_independent.unet_dino import (
-    U2NetDinoAvg224Method,
-    DINOU2NetClampedSum224Method,
-    U2NetDinoAvg320Method,
-    DINO448U2NetAvg320Method,
+# from attribution.model_independent.unet_based import U2NetSaliencyMethod
+from attribution.model_independent.avi_methods import (
+    Dino448Attribution,
+    DinoU2NetAttribution,
+    DinoAttribution,
+    DinoU2Net320Attribution,
+    DinoU2NetSumAttribution,
+    U2NetAttribution,
+    Dino448U2NetAttribution
 )
 # --- Category 3: Continuous wrappers ---------------------------------------
 from attribution.continuous import ContinuousWrapper, U2NetUnderlayFillWrapper
@@ -56,7 +58,6 @@ from attribution.continuous import ContinuousWrapper, U2NetUnderlayFillWrapper
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
-
 METHOD_REGISTRY = {
     # --- Model-dependent ---------------------------------------------------
     "saliency": SaliencyMethod(),
@@ -72,20 +73,21 @@ METHOD_REGISTRY = {
     "random_baseline": RandomBaselineMethod(),
 
     # --- Model-independent -------------------------------------------------
-    # "dinov2_attention": Dinov2AttnMethod(),
-    # "dinov2_PC1": Dinov2Pc1Method(),
-    # "dinov2_PC_EV": Dinov2PcEigenweightedMethod(),
-    # "dinov2_PC_L2": Dinov2PcL2Method(),
-    # "dinov2_COMBO_FIXED": Dinov2ComboFixedMethod(),
-    # "dinov2_ENT": Dinov2ComboEntropyMethod(),
+    "dinov2_attention": Dinov2AttnMethod(),
+    "dinov2_PC1": Dinov2Pc1Method(),
+    "dinov2_PC_EV": Dinov2PcEigenweightedMethod(),
+    "dinov2_PC_L2": Dinov2PcL2Method(),
+    "dinov2_COMBO_FIXED": Dinov2ComboFixedMethod(),
+    "dinov2_ENT": Dinov2ComboEntropyMethod(),
     "dinov2_COMBO_ENT_SMOOTH": Dinov2ComboEntSmoothMethod(),
-    
-    "dino_TriSignalGuided": Dinov2TriSignalGuidedMethod(),
-    "U2Net-Saliency": U2NetSaliencyMethod(),
-    "u2net_dino_avg_224": U2NetDinoAvg224Method(),
-    "dino_u2net_sum_224": DINOU2NetClampedSum224Method(),
-    "u2net_dino_avg_320": U2NetDinoAvg320Method(),
-    "dino448_u2net_avg_320": DINO448U2NetAvg320Method(),
+
+    "dino": DinoAttribution(),
+    "U2Net-Saliency": U2NetAttribution(),
+    "u2net_dino_avg_224": DinoU2NetAttribution(),
+    "dino_u2net_sum_224": DinoU2NetSumAttribution(),
+    "u2net_dino_avg_320": DinoU2Net320Attribution(),
+    "dino448_u2net_avg_320": Dino448Attribution(),
+    "Dino448U2NetAttribution": Dino448U2NetAttribution(),
 
     # # --- Continuous wrappers -----------------------------------------------
     # "saliency_continuous": ContinuousWrapper(SaliencyMethod(), sigma=2.0),

@@ -22,7 +22,7 @@ from attribution.model_independent.dinov2_methods import (
     Dinov2AttnMethod,
     Dinov2ComboEntSmoothMethod
 )
-from attribution.model_independent.unet_dino import U2NetDinoFusionMethod
+from attribution.model_independent.avi_methods import U2NetDinoFusionMethod
 from attribution.model_independent.unet_based import U2NetSaliencyMethod
 
 # ---------------------------------------------------------------------------

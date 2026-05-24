@@ -104,23 +104,24 @@ DATASET_CONFIG = {
 }
 
 # Current dataset to use
-# DATASET_NAME = "imagenet"
-DATASET_NAME = "SIPaKMeD_cropped"
+DATASET_NAME = "imagenet"
+# DATASET_NAME = "SIPaKMeD_cropped"
 
 # -----------------
 # Model Configuration
 # -----------------
 # Models used for generating attribution heatmaps (Phase 1)
 GENERATING_MODELS = [
-    # "resnet50",
+    "resnet50",
+    "efficientnet_b0",
     # "mobilenet_v2",
     # "vgg16",
 
     # "vit_b_16",
     # "swin_t",
 
-    "sipakmed_cropped_efficientnet.pth",
-    "sipakmed_cropped_ResNet50.pth",
+    # "sipakmed_efficientnet.pth",
+    # "sipakmed_ResNet50.pth",
 ]
 
 # Models used for evaluating occluded images (Phase 2)
@@ -132,8 +133,8 @@ JUDGING_MODELS = [
     # "vit_b_16",
     # "swin_t",
 
-    "sipakmed_cropped_efficientnet.pth",
-    "sipakmed_cropped_ResNet50.pth",
+    # "sipakmed_cropped_efficientnet.pth",
+    # "sipakmed_cropped_ResNet50.pth",
 
     # "llama3.2-vision-binary",
     # "llama3.2-vision-cosine",
@@ -165,12 +166,12 @@ ATTRIBUTION_METHODS = [
     # "dinov2_COMBO_FIXED",
     # "dinov2_ENT",
     "dinov2_COMBO_ENT_SMOOTH",
-    "dino_TriSignalGuided",
     "U2Net-Saliency",
     "u2net_dino_avg_224",
     "dino_u2net_sum_224",
     "u2net_dino_avg_320",
     "dino448_u2net_avg_320",
+
     # --- Continuous wrappers ---
     # "saliency_continuous",
     # "inputxgradient_continuous",
@@ -229,4 +230,4 @@ FILL_STRATEGIES = [
 # -----------------
 # Colormap for regular heatmap visualization (Phase 1)
 # Options: "hot", "jet", "viridis", "rainbow", "turbo"
-HEATMAP_COLORMAP = "hot"
+HEATMAP_COLORMAP = "jet"

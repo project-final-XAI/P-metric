@@ -1,5 +1,4 @@
-"""
-Centralized file path and I/O management for CROSS-XAI experiments.
+"""Centralized file path and I/O management for CROSS-XAI experiments.
 
 Handles all file operations including heatmaps, results, and progress tracking.
 Intelligently handles Model-Independent (no model) vs Model-Dependent paths.
@@ -21,7 +20,6 @@ class FileManager:
         self.analysis_dir = self.base_dir / "results" / "analysis"
 
     # ==================== Helpers ====================
-
     @staticmethod
     def _sanitize_category(name: str) -> str:
         """Sanitize a category name for use in filenames."""
@@ -29,35 +27,34 @@ class FileManager:
         return "".join(c for c in safe if c.isalnum() or c in "_-")[:30]
 
     def _build_heatmap_subpath(self, dataset: str, model: Optional[str], method: str, subfolder: str) -> Path:
-        """Helper to build the directory path, dropping the model folder if None."""
+        """Helper to build the directory path, nesting method under model if model is present."""
         if model is None:
             return self.heatmap_dir / dataset / method / subfolder
-        return self.heatmap_dir / dataset / f"{model}_{method}" / subfolder
+        # CHANGED: Swapped from flat f"{model}_{method}" to nested folder model / method
+        return self.heatmap_dir / dataset / model / method / subfolder
 
-    def _build_heatmap_filename(self, model: Optional[str], method: str, img_id: str, category_name: Optional[str], ext: str) -> str:
-        """Helper to build the filename, dropping the model prefix if None."""
-        prefix = f"{model}-{method}" if model else method
-
+    def _build_heatmap_filename(self, img_id: str, category_name: Optional[str], ext: str) -> str:
+        """Helper to build the filename: uses {id}_{category}.{ext} if category exists, else {id}.{ext}."""
         if category_name:
             safe_category = self._sanitize_category(category_name)
-            return f"{prefix}-{img_id}-{safe_category}.{ext}"
-        return f"{prefix}-{img_id}.{ext}"
+            return f"{img_id}_{safe_category}.{ext}"
+        return f"{img_id}.{ext}"
 
     # ==================== Heatmap Paths (Phase 1) ====================
 
     def get_heatmap_dir(self, dataset: str) -> Path:
         return self.heatmap_dir / dataset
 
-    def get_sorted_heatmap_path(self, dataset: str, model: Optional[str], method: str, img_id: str, category_name: str = None) -> Path:
+    def get_sorted_heatmap_path(self, dataset: str, model: Optional[str], method: str, img_id: str, category_name: Optional[str] = None) -> Path:
         """Get path to sorted heatmap NPY file."""
         dir_path = self._build_heatmap_subpath(dataset, model, method, "sorted")
-        filename = self._build_heatmap_filename(model, method, img_id, category_name, "npy")
+        filename = self._build_heatmap_filename(img_id, category_name, "npy")
         return dir_path / filename
 
-    def get_regular_heatmap_path(self, dataset: str, model: Optional[str], method: str, img_id: str, category_name: str = None) -> Path:
+    def get_regular_heatmap_path(self, dataset: str, model: Optional[str], method: str, img_id: str, category_name: Optional[str] = None) -> Path:
         """Get path to regular heatmap PNG file."""
         dir_path = self._build_heatmap_subpath(dataset, model, method, "regular")
-        filename = self._build_heatmap_filename(model, method, img_id, category_name, "png")
+        filename = self._build_heatmap_filename(img_id, category_name, "png")
         return dir_path / filename
 
     def scan_sorted_heatmaps(self, dataset: str, model: Optional[str], method: str) -> List[Path]:
@@ -79,19 +76,17 @@ class FileManager:
         strategy: str,
         method: str,
         level: int,
-        img_id: str
+        img_id: str,
+        category_name: Optional[str] = None
     ) -> Path:
-        """
-        Get path to occluded image.
-        If model is None, it outputs to: results/occluded/{dataset}/{method}/{strategy}/{level}/{method}-{img_id}.png
-        """
-        prefix = f"{model}-{method}" if model else method
-        filename = f"{prefix}-{img_id}.png"
+        """Get path to occluded image."""
+        filename = self._build_heatmap_filename(img_id, category_name, "png")
 
         if model is None:
             return self.get_occluded_dir(dataset) / method / strategy / str(level) / filename
 
-        return self.get_occluded_dir(dataset) / f"{model}_{method}" / strategy / str(level) / filename
+        # CHANGED: Nested method within model folder for structured tracking
+        return self.get_occluded_dir(dataset) / model / method / strategy / str(level) / filename
 
     def scan_occluded_images(
         self,
@@ -105,7 +100,8 @@ class FileManager:
         if model is None:
             level_dir = self.get_occluded_dir(dataset) / method / strategy / str(level)
         else:
-            level_dir = self.get_occluded_dir(dataset) / f"{model}_{method}" / strategy / str(level)
+            # CHANGED: Updated directory look-up pattern to check nested structure
+            level_dir = self.get_occluded_dir(dataset) / model / method / strategy / str(level)
 
         if not level_dir.exists():
             return []
@@ -124,11 +120,11 @@ class FileManager:
         method: str,
         strategy: str
     ) -> Path:
-        """
-        Get path to result CSV file.
-        """
-        target_folder = f"{gen_model}_{method}" if gen_model else method
-        return self.get_result_dir(dataset) / judge_model / target_folder / f"{strategy}.csv"
+        """Get path to result CSV file."""
+        # CHANGED: Splitting target folder into model / method layout instead of an underscore join
+        if gen_model:
+            return self.get_result_dir(dataset) / judge_model / gen_model / method / f"{strategy}.csv"
+        return self.get_result_dir(dataset) / judge_model / method / f"{strategy}.csv"
 
     # ==================== I/O Operations ====================
 
