@@ -30,7 +30,6 @@ from attribution.model_dependent.other import (
     GuidedBackpropMethod,
     RandomBaselineMethod,
 )
-from attribution.model_dependent.c3f import C3FMethod
 
 # --- Category 2: Model-independent -----------------------------------------
 from attribution.model_independent.dinov2_methods import (
@@ -45,8 +44,6 @@ from attribution.model_independent.dinov2_methods import (
 )
 from attribution.model_independent.unet_based import U2NetSaliencyMethod
 from attribution.model_independent.unet_dino import (
-    U2NetDinoFusionMethod,
-    U2NetDinoProductMethod,
     U2NetDinoAvg224Method,
     DINOU2NetClampedSum224Method,
     U2NetDinoAvg320Method,
@@ -73,21 +70,18 @@ METHOD_REGISTRY = {
     "grad_cam": GradCAMMethod(),
     "guided_gradcam": GuidedGradCAMMethod(),
     "random_baseline": RandomBaselineMethod(),
-    "c3f": C3FMethod(),
 
     # --- Model-independent -------------------------------------------------
-    "dinov2_attention": Dinov2AttnMethod(),
-    "dinov2_PC1": Dinov2Pc1Method(),
-    "dinov2_PC_EV": Dinov2PcEigenweightedMethod(),
-    "dinov2_PC_L2": Dinov2PcL2Method(),
-    "dinov2_COMBO_FIXED": Dinov2ComboFixedMethod(),
-    "dinov2_ENT": Dinov2ComboEntropyMethod(),
+    # "dinov2_attention": Dinov2AttnMethod(),
+    # "dinov2_PC1": Dinov2Pc1Method(),
+    # "dinov2_PC_EV": Dinov2PcEigenweightedMethod(),
+    # "dinov2_PC_L2": Dinov2PcL2Method(),
+    # "dinov2_COMBO_FIXED": Dinov2ComboFixedMethod(),
+    # "dinov2_ENT": Dinov2ComboEntropyMethod(),
     "dinov2_COMBO_ENT_SMOOTH": Dinov2ComboEntSmoothMethod(),
     
-    "dino": Dinov2TriSignalGuidedMethod(),
+    "dino_TriSignalGuided": Dinov2TriSignalGuidedMethod(),
     "U2Net-Saliency": U2NetSaliencyMethod(),
-    "u2net_dino_fusion": U2NetDinoFusionMethod(),
-    "u2net_dino_product": U2NetDinoProductMethod(),
     "u2net_dino_avg_224": U2NetDinoAvg224Method(),
     "dino_u2net_sum_224": DINOU2NetClampedSum224Method(),
     "u2net_dino_avg_320": U2NetDinoAvg320Method(),

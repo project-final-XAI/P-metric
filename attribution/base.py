@@ -12,8 +12,7 @@ class AttributionMethod(ABC):
     upscale) while subclasses only implement ``_compute_raw``.
     """
 
-    def __init__(self, name: str, process_size: Tuple[int, int] = (224, 224)):
-        self.process_size = process_size
+    def __init__(self, name: str):
         self.name = name
 
     def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -25,9 +24,6 @@ class AttributionMethod(ABC):
         4. Upscale:      restore original spatial dimensions if needed.
         """
         _, _, orig_h, orig_w = images.shape
-
-        # 1. Optional resize
-        images = F.interpolate(images, size=self.process_size, mode="bilinear", align_corners=False)
 
         # 2. Raw attribution (subclass hook)
         raw_attribution = self._compute_raw(model, images, targets)

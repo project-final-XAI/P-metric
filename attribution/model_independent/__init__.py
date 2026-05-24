@@ -14,4 +14,3 @@ from attribution.model_independent.dinov2_methods import (
     Dinov2ComboEntSmoothMethod,
 )
 from attribution.model_independent.unet_based import U2NetSaliencyMethod
-from attribution.model_independent.unet_dino import U2NetDinoFusionMethod

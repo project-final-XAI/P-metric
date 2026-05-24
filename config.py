@@ -145,31 +145,32 @@ JUDGING_MODELS = [
 # -----------------
 ATTRIBUTION_METHODS = [
     # --- Model-dependent (need the classifier) ---
-    "saliency",
-    "inputxgradient",
-            # "smoothgrad", cause problems with hardware
-    "guided_backprop",
-    "integrated_gradients",
-    "occlusion",
-    "gradientshap",
-    "xrai",
-    "grad_cam",
-    "guided_gradcam",
-    "random_baseline",
+    # "saliency",
+    # "inputxgradient",
+    #         # "smoothgrad", cause problems with hardware
+    # "guided_backprop",
+    # "integrated_gradients",
+    # "occlusion",
+    # "gradientshap",
+    # "xrai",
+    # "grad_cam",
+    # "guided_gradcam",
+    # "random_baseline",
 
     # --- Model-independent (DINO / U2Net) ---
-    "dinov2_attention",
+    # "dinov2_attention",
     # "dinov2_PC1",
     # "dinov2_PC_EV",
     # "dinov2_PC_L2",
     # "dinov2_COMBO_FIXED",
     # "dinov2_ENT",
     "dinov2_COMBO_ENT_SMOOTH",
+    "dino_TriSignalGuided",
     "U2Net-Saliency",
-    "u2net_dino_fusion",
-    "u2net_dino_product",
-    # "dinov2_COMBO_ENT_SMOOTH_U2_TOP3",
-
+    "u2net_dino_avg_224",
+    "dino_u2net_sum_224",
+    "u2net_dino_avg_320",
+    "dino448_u2net_avg_320",
     # --- Continuous wrappers ---
     # "saliency_continuous",
     # "inputxgradient_continuous",
