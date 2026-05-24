@@ -197,7 +197,7 @@ class Phase1Runner:
             )
 
             if self.config.DEVICE == "cuda":
-                with torch.amp.autocast(self.config.DEVICE):
+                with torch.amp.autocast(self.config.DEVICE, enabled=False):
                     heatmaps = method.compute(model, batch_images, batch_labels)
             else:
                 heatmaps = method.compute(model, batch_images, batch_labels)

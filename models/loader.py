@@ -85,13 +85,18 @@ class CustomModelProvider(BaseModelProvider):
         weights_path = self._resolve_weights_path(model_name)
 
         # 2. Build the base architecture dynamically
-        if model_name.startswith("efficientnet"):
-            model = models.get_model(model_name.split("_sipakmed")[0], weights=None)
+        clean_name = model_name.lower().replace(".pth", "")
+        if "efficientnet" in clean_name:
+            base_arch = "efficientnet_b0"
+            if "efficientnet_b0" in clean_name or "efficientnetb0" in clean_name:
+                base_arch = "efficientnet_b0"
+            model = models.get_model(base_arch, weights=None)
             in_features = model.classifier[1].in_features
 
-            # If you used the same custom head for EfficientNet, it goes here!
-            # Note: EfficientNet's classifier is named 'classifier'
-            model.classifier = nn.Sequential(
+            # In the training notebook, model.classifier was left as the standard 1000-class head.
+            # However, model.fc was added as a dummy sequential head. We recreate that structure
+            # here so all checkpoint weights load successfully.
+            model.fc = nn.Sequential(
                 nn.Dropout(p=0.4, inplace=True),
                 nn.Linear(in_features, 512),
                 nn.ReLU(inplace=True),
@@ -99,8 +104,18 @@ class CustomModelProvider(BaseModelProvider):
                 nn.Linear(512, self.num_classes)
             )
 
-        elif model_name.startswith("resnet"):
-            model = models.get_model(model_name.split("_sipakmed")[0], weights=None)
+            # Since the standard forward pass of EfficientNet uses model.classifier, we override
+            # the forward method to return only the first 5 classes corresponding to self.num_classes.
+            original_forward = model.forward
+            def custom_forward(x):
+                return original_forward(x)[:, :self.num_classes]
+            model.forward = custom_forward
+
+        elif "resnet" in clean_name:
+            base_arch = "resnet50"
+            if "resnet50" in clean_name:
+                base_arch = "resnet50"
+            model = models.get_model(base_arch, weights=None)
             in_features = model.fc.in_features
 
             # Your exact custom head for ResNet!
@@ -120,8 +135,13 @@ class CustomModelProvider(BaseModelProvider):
 
         # Handle dict vs raw state_dict checkpoints
         if isinstance(checkpoint, dict):
-            state_key = 'state_dict' if 'state_dict' in checkpoint else 'model_state_dict'
-            state_dict = checkpoint.get(state_key, checkpoint) # Fallback to dict itself
+            # Check for standard state dict keys
+            state_key = None
+            for k in ['model', 'state_dict', 'model_state_dict']:
+                if k in checkpoint:
+                    state_key = k
+                    break
+            state_dict = checkpoint.get(state_key, checkpoint) if state_key is not None else checkpoint
             model.load_state_dict(state_dict, strict=False)
         else:
             # Fallback if the user saved the entire model object (not recommended, but supported)

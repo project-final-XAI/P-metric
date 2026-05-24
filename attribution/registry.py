@@ -82,12 +82,12 @@ METHOD_REGISTRY = {
     "dinov2_COMBO_ENT_SMOOTH": Dinov2ComboEntSmoothMethod(),
 
     "dino": DinoAttribution(),
-    "U2Net-Saliency": U2NetAttribution(),
-    "u2net_dino_avg_224": DinoU2NetAttribution(),
-    "dino_u2net_sum_224": DinoU2NetSumAttribution(),
-    "u2net_dino_avg_320": DinoU2Net320Attribution(),
-    "dino448_u2net_avg_320": Dino448Attribution(),
-    "Dino448U2NetAttribution": Dino448U2NetAttribution(),
+    "dino448": Dino448Attribution(),
+    "u2net": U2NetAttribution(),
+    "u2net+dino": DinoU2NetAttribution(),
+    "dino+u2net_sum": DinoU2NetSumAttribution(),
+    "u2net+dino_320": DinoU2Net320Attribution(),
+    "dino448+u2net": Dino448U2NetAttribution(),
 
     # # --- Continuous wrappers -----------------------------------------------
     # "saliency_continuous": ContinuousWrapper(SaliencyMethod(), sigma=2.0),

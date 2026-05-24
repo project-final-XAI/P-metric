@@ -21,15 +21,20 @@ pip install torch torchvision scipy Pillow numpy
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from PIL import Image
 from scipy.ndimage import gaussian_filter
 from torchvision import transforms
 
 from attribution.base import ModelIndependentMethod
 import config
+
+MODELS_DIR = getattr(config, "MODELS_DIR", None)
+WEIGHTS_PATH = MODELS_DIR / "u2net.pth"
 
 # ---------------------------------------------------------------------------
 # Shared constants  (mirror stage1_all_methods.py)
@@ -66,15 +71,7 @@ def _ensure_dino() -> nn.Module:
     return _MODEL_CACHE["dino"]
 
 
-def _ensure_u2net() -> nn.Module:
-    """Load and cache U2Net from config.U2NET_WEIGHTS (called once on first use)."""
-    if "u2net" not in _MODEL_CACHE:
-        weights = config.U2NET_WEIGHTS
-        print(f"[AviMethods] Loading U2Net from {weights} on {DEVICE} …")
-        m = U2NET(3, 1)
-        m.load_state_dict(torch.load(weights, map_location=DEVICE, weights_only=True))
-        _MODEL_CACHE["u2net"] = m.to(DEVICE).eval()
-    return _MODEL_CACHE["u2net"]
+from attribution.model_independent.unet_based import _ensure_u2net
 
 
 # ---------------------------------------------------------------------------
@@ -215,172 +212,7 @@ def _dino_single_pass(
     return (hm - lo) / (hi - lo + 1e-8)
 
 
-# ---------------------------------------------------------------------------
-# U2Net architecture  (verbatim from stage1_all_methods.py)
-# ---------------------------------------------------------------------------
-
-class _REBNCONV(nn.Module):
-    def __init__(self, in_ch=3, out_ch=3, dirate=1):
-        super().__init__()
-        self.conv_s1 = nn.Conv2d(in_ch, out_ch, 3, padding=dirate, dilation=dirate)
-        self.bn_s1   = nn.BatchNorm2d(out_ch)
-        self.relu    = nn.ReLU(inplace=True)
-    def forward(self, x): return self.relu(self.bn_s1(self.conv_s1(x)))
-
-def _up(src, tgt):
-    return F.interpolate(src, size=tgt.shape[2:], mode="bilinear", align_corners=False)
-
-class _RSU7(nn.Module):
-    def __init__(self, in_ch=3, mid_ch=12, out_ch=3):
-        super().__init__()
-        self.rebnconvin = _REBNCONV(in_ch, out_ch)
-        self.rebnconv1  = _REBNCONV(out_ch,    mid_ch); self.pool1 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.rebnconv2  = _REBNCONV(mid_ch,    mid_ch); self.pool2 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.rebnconv3  = _REBNCONV(mid_ch,    mid_ch); self.pool3 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.rebnconv4  = _REBNCONV(mid_ch,    mid_ch); self.pool4 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.rebnconv5  = _REBNCONV(mid_ch,    mid_ch); self.pool5 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.rebnconv6  = _REBNCONV(mid_ch,    mid_ch)
-        self.rebnconv7  = _REBNCONV(mid_ch,    mid_ch, dirate=2)
-        self.rebnconv6d = _REBNCONV(mid_ch*2,  mid_ch); self.rebnconv5d = _REBNCONV(mid_ch*2, mid_ch)
-        self.rebnconv4d = _REBNCONV(mid_ch*2,  mid_ch); self.rebnconv3d = _REBNCONV(mid_ch*2, mid_ch)
-        self.rebnconv2d = _REBNCONV(mid_ch*2,  mid_ch); self.rebnconv1d = _REBNCONV(mid_ch*2, out_ch)
-    def forward(self, x):
-        xi = self.rebnconvin(x)
-        e1=self.rebnconv1(xi);               e2=self.rebnconv2(self.pool1(e1))
-        e3=self.rebnconv3(self.pool2(e2));   e4=self.rebnconv4(self.pool3(e3))
-        e5=self.rebnconv5(self.pool4(e4));   e6=self.rebnconv6(self.pool5(e5))
-        e7=self.rebnconv7(e6)
-        d=self.rebnconv6d(torch.cat((_up(e7,e6),e6),1))
-        d=self.rebnconv5d(torch.cat((_up(d,e5), e5),1))
-        d=self.rebnconv4d(torch.cat((_up(d,e4), e4),1))
-        d=self.rebnconv3d(torch.cat((_up(d,e3), e3),1))
-        d=self.rebnconv2d(torch.cat((_up(d,e2), e2),1))
-        d=self.rebnconv1d(torch.cat((_up(d,e1), e1),1))
-        return d + xi
-
-class _RSU6(nn.Module):
-    def __init__(self, in_ch=3, mid_ch=12, out_ch=3):
-        super().__init__()
-        self.rebnconvin = _REBNCONV(in_ch, out_ch)
-        self.rebnconv1  = _REBNCONV(out_ch,   mid_ch); self.pool1 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.rebnconv2  = _REBNCONV(mid_ch,   mid_ch); self.pool2 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.rebnconv3  = _REBNCONV(mid_ch,   mid_ch); self.pool3 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.rebnconv4  = _REBNCONV(mid_ch,   mid_ch); self.pool4 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.rebnconv5  = _REBNCONV(mid_ch,   mid_ch)
-        self.rebnconv6  = _REBNCONV(mid_ch,   mid_ch, dirate=2)
-        self.rebnconv5d = _REBNCONV(mid_ch*2, mid_ch); self.rebnconv4d = _REBNCONV(mid_ch*2, mid_ch)
-        self.rebnconv3d = _REBNCONV(mid_ch*2, mid_ch); self.rebnconv2d = _REBNCONV(mid_ch*2, mid_ch)
-        self.rebnconv1d = _REBNCONV(mid_ch*2, out_ch)
-    def forward(self, x):
-        xi=self.rebnconvin(x)
-        e1=self.rebnconv1(xi);             e2=self.rebnconv2(self.pool1(e1))
-        e3=self.rebnconv3(self.pool2(e2)); e4=self.rebnconv4(self.pool3(e3))
-        e5=self.rebnconv5(self.pool4(e4)); e6=self.rebnconv6(e5)
-        d=self.rebnconv5d(torch.cat((_up(e6,e5),e5),1))
-        d=self.rebnconv4d(torch.cat((_up(d,e4), e4),1))
-        d=self.rebnconv3d(torch.cat((_up(d,e3), e3),1))
-        d=self.rebnconv2d(torch.cat((_up(d,e2), e2),1))
-        d=self.rebnconv1d(torch.cat((_up(d,e1), e1),1))
-        return d + xi
-
-class _RSU5(nn.Module):
-    def __init__(self, in_ch=3, mid_ch=12, out_ch=3):
-        super().__init__()
-        self.rebnconvin = _REBNCONV(in_ch, out_ch)
-        self.rebnconv1  = _REBNCONV(out_ch,   mid_ch); self.pool1 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.rebnconv2  = _REBNCONV(mid_ch,   mid_ch); self.pool2 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.rebnconv3  = _REBNCONV(mid_ch,   mid_ch); self.pool3 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.rebnconv4  = _REBNCONV(mid_ch,   mid_ch)
-        self.rebnconv5  = _REBNCONV(mid_ch,   mid_ch, dirate=2)
-        self.rebnconv4d = _REBNCONV(mid_ch*2, mid_ch); self.rebnconv3d = _REBNCONV(mid_ch*2, mid_ch)
-        self.rebnconv2d = _REBNCONV(mid_ch*2, mid_ch); self.rebnconv1d = _REBNCONV(mid_ch*2, out_ch)
-    def forward(self, x):
-        xi=self.rebnconvin(x)
-        e1=self.rebnconv1(xi);             e2=self.rebnconv2(self.pool1(e1))
-        e3=self.rebnconv3(self.pool2(e2)); e4=self.rebnconv4(self.pool3(e3))
-        e5=self.rebnconv5(e4)
-        d=self.rebnconv4d(torch.cat((_up(e5,e4),e4),1))
-        d=self.rebnconv3d(torch.cat((_up(d,e3), e3),1))
-        d=self.rebnconv2d(torch.cat((_up(d,e2), e2),1))
-        d=self.rebnconv1d(torch.cat((_up(d,e1), e1),1))
-        return d + xi
-
-class _RSU4(nn.Module):
-    def __init__(self, in_ch=3, mid_ch=12, out_ch=3):
-        super().__init__()
-        self.rebnconvin = _REBNCONV(in_ch, out_ch)
-        self.rebnconv1  = _REBNCONV(out_ch,   mid_ch); self.pool1 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.rebnconv2  = _REBNCONV(mid_ch,   mid_ch); self.pool2 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.rebnconv3  = _REBNCONV(mid_ch,   mid_ch)
-        self.rebnconv4  = _REBNCONV(mid_ch,   mid_ch, dirate=2)
-        self.rebnconv3d = _REBNCONV(mid_ch*2, mid_ch); self.rebnconv2d = _REBNCONV(mid_ch*2, mid_ch)
-        self.rebnconv1d = _REBNCONV(mid_ch*2, out_ch)
-    def forward(self, x):
-        xi=self.rebnconvin(x)
-        e1=self.rebnconv1(xi);             e2=self.rebnconv2(self.pool1(e1))
-        e3=self.rebnconv3(self.pool2(e2)); e4=self.rebnconv4(e3)
-        d=self.rebnconv3d(torch.cat((_up(e4,e3),e3),1))
-        d=self.rebnconv2d(torch.cat((_up(d,e2), e2),1))
-        d=self.rebnconv1d(torch.cat((_up(d,e1), e1),1))
-        return d + xi
-
-class _RSU4F(nn.Module):
-    def __init__(self, in_ch=3, mid_ch=12, out_ch=3):
-        super().__init__()
-        self.rebnconvin = _REBNCONV(in_ch,    out_ch)
-        self.rebnconv1  = _REBNCONV(out_ch,   mid_ch, dirate=1)
-        self.rebnconv2  = _REBNCONV(mid_ch,   mid_ch, dirate=2)
-        self.rebnconv3  = _REBNCONV(mid_ch,   mid_ch, dirate=4)
-        self.rebnconv4  = _REBNCONV(mid_ch,   mid_ch, dirate=8)
-        self.rebnconv3d = _REBNCONV(mid_ch*2, mid_ch, dirate=4)
-        self.rebnconv2d = _REBNCONV(mid_ch*2, mid_ch, dirate=2)
-        self.rebnconv1d = _REBNCONV(mid_ch*2, out_ch, dirate=1)
-    def forward(self, x):
-        xi=self.rebnconvin(x)
-        e1=self.rebnconv1(xi); e2=self.rebnconv2(e1)
-        e3=self.rebnconv3(e2); e4=self.rebnconv4(e3)
-        d=self.rebnconv3d(torch.cat((e4,e3),1))
-        d=self.rebnconv2d(torch.cat((d,  e2),1))
-        d=self.rebnconv1d(torch.cat((d,  e1),1))
-        return d + xi
-
-class U2NET(nn.Module):
-    """U²-Net full-size salient-object detection model."""
-    def __init__(self, in_ch: int = 3, out_ch: int = 1):
-        super().__init__()
-        self.stage1 = _RSU7(in_ch,  32,  64);  self.pool12 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.stage2 = _RSU6(64,     32, 128);  self.pool23 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.stage3 = _RSU5(128,    64, 256);  self.pool34 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.stage4 = _RSU4(256,   128, 512);  self.pool45 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.stage5 = _RSU4F(512,  256, 512);  self.pool56 = nn.MaxPool2d(2,2,ceil_mode=True)
-        self.stage6 = _RSU4F(512,  256, 512)
-        self.stage5d = _RSU4F(1024, 256, 512)
-        self.stage4d = _RSU4(1024,  128, 256)
-        self.stage3d = _RSU5(512,    64, 128)
-        self.stage2d = _RSU6(256,    32,  64)
-        self.stage1d = _RSU7(128,    16,  64)
-        self.side1   = nn.Conv2d( 64, out_ch, 3, padding=1)
-        self.side2   = nn.Conv2d( 64, out_ch, 3, padding=1)
-        self.side3   = nn.Conv2d(128, out_ch, 3, padding=1)
-        self.side4   = nn.Conv2d(256, out_ch, 3, padding=1)
-        self.side5   = nn.Conv2d(512, out_ch, 3, padding=1)
-        self.side6   = nn.Conv2d(512, out_ch, 3, padding=1)
-        self.outconv = nn.Conv2d(6 * out_ch, out_ch, 1)
-
-    def forward(self, x):
-        h1=self.stage1(x);               h2=self.stage2(self.pool12(h1))
-        h3=self.stage3(self.pool23(h2)); h4=self.stage4(self.pool34(h3))
-        h5=self.stage5(self.pool45(h4)); h6=self.stage6(self.pool56(h5))
-        h5d=self.stage5d(torch.cat((_up(h6,h5), h5),1))
-        h4d=self.stage4d(torch.cat((_up(h5d,h4),h4),1))
-        h3d=self.stage3d(torch.cat((_up(h4d,h3),h3),1))
-        h2d=self.stage2d(torch.cat((_up(h3d,h2),h2),1))
-        h1d=self.stage1d(torch.cat((_up(h2d,h1),h1),1))
-        d1=self.side1(h1d)
-        d2=_up(self.side2(h2d),d1); d3=_up(self.side3(h3d),d1)
-        d4=_up(self.side4(h4d),d1); d5=_up(self.side5(h5d),d1)
-        d6=_up(self.side6(h6),   d1)
-        return torch.sigmoid(self.outconv(torch.cat((d1,d2,d3,d4,d5,d6),1)))
+# U2Net architecture classes removed; imported _ensure_u2net directly from unet_based.
 
 
 # ---------------------------------------------------------------------------
@@ -442,7 +274,7 @@ class DinoAttribution(ModelIndependentMethod):
         B, C, H, W = images.shape
         guide = _denormalize_imagenet(images)
         x_dino_rgb = _resize_batch(guide, self.dino_size)
-        x_dino     = _imagenet_normalize(x_dino_rgb)
+        x_dino     = x_dino_rgb  # Unnormalized to match stage1_all_methods.py
         gf_r = round(self.gf_radius * H / self.dino_size)
 
         model = self._get_model()
@@ -489,18 +321,47 @@ class U2NetAttribution(ModelIndependentMethod):
         return _ensure_u2net()
 
     def compute_independent(self, images: torch.Tensor) -> torch.Tensor:
-        x_u2 = _resize_batch(images, self.u2net_size)
+        B, C, H, W = images.shape
+        u2net = self._get_model()
+        model_device = next(u2net.parameters()).device
 
-        with torch.no_grad():
-            preds = self._get_model()(x_u2)
+        # Reverse ImageNet normalization to get RGB [0,1]
+        mean = torch.tensor(_IMAGENET_MEAN, device=images.device).view(1, 3, 1, 1)
+        std = torch.tensor(_IMAGENET_STD, device=images.device).view(1, 3, 1, 1)
+        rgb01 = (images * std + mean).clamp(0, 1)
 
         heatmaps = []
-        for i in range(preds.shape[0]):
-            hm = preds[i, 0].cpu().numpy().astype(np.float64)
+        _no_amp = (
+            torch.amp.autocast("cuda", enabled=False)
+            if model_device.type == "cuda"
+            else nullcontext()
+        )
+
+        for i in range(B):
+            # 1. Convert to uint8 numpy array exactly as the user's snippet inputs expect
+            img_np = (rgb01[i].cpu().permute(1, 2, 0).numpy() * 255.0).astype(np.uint8)
+
+            # 2. Resize and normalize using PIL and numpy as in stage1_all_methods.py
+            pil = Image.fromarray(img_np).resize((self.u2net_size, self.u2net_size), Image.BILINEAR)
+            inp = np.array(pil, dtype=np.float32) / 255.0
+            
+            mean_np = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+            std_np  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+            inp = (inp - mean_np) / std_np
+            
+            tensor = torch.from_numpy(inp.transpose(2, 0, 1)).unsqueeze(0).to(model_device)
+
+            # 3. Model inference
+            with torch.no_grad(), _no_amp:
+                pred = u2net(tensor)
+
+            # 4. Extract alpha, map to float64, and post-process
+            alpha = pred.squeeze().cpu().numpy().astype(np.float64)
             if self.smooth_sigma > 0:
-                hm = gaussian_filter(hm, sigma=self.smooth_sigma)
-            hm = _norm01(hm).astype(np.float32)
-            heatmaps.append(torch.from_numpy(hm))
+                alpha = gaussian_filter(alpha, sigma=self.smooth_sigma)
+            alpha = _norm01(alpha).astype(np.float32)
+
+            heatmaps.append(torch.from_numpy(alpha).to(images.device))
 
         return torch.stack(heatmaps)
 
@@ -540,7 +401,7 @@ class DinoU2NetAttribution(ModelIndependentMethod):
         blended = []
         for i in range(B):
             combined = _norm01(hm_d_np[i] + hm_u_np[i]).astype(np.float32)
-            blended.append(torch.from_numpy(combined))
+            blended.append(torch.from_numpy(combined).to(images.device))
 
         return torch.stack(blended)
 
@@ -569,7 +430,7 @@ class Dino448Attribution(DinoAttribution):
         B = images.shape[0]
         guide = _denormalize_imagenet(images)
         guide_hi   = _resize_batch(guide, self.dino_size)
-        x_dino     = _imagenet_normalize(guide_hi)
+        x_dino     = guide_hi  # Unnormalized to match stage1_all_methods.py
 
         base_out_size = 224
         gf_r = round(self.gf_radius * self.dino_size / base_out_size)
@@ -656,7 +517,7 @@ class DinoU2Net320Attribution(ModelIndependentMethod):
         blended = []
         for i in range(B):
             combined = _norm01(hm_d_np[i] + hm_u_np[i]).astype(np.float32)
-            blended.append(torch.from_numpy(combined))
+            blended.append(torch.from_numpy(combined).to(images.device))
 
         return torch.stack(blended)
 
@@ -671,7 +532,7 @@ class Dino448U2NetAttribution(ModelIndependentMethod):
     """
 
     def __init__(self):
-        super().__init__(name="dino448_u2net_avg_320")
+        super().__init__(name="dino448+u2net")
         self._dino448 = Dino448Attribution()
         self._u2net   = U2NetAttribution()
 
@@ -691,6 +552,6 @@ class Dino448U2NetAttribution(ModelIndependentMethod):
         blended = []
         for i in range(B):
             combined = _norm01(hm_d_np[i] + hm_u_np[i]).astype(np.float32)
-            blended.append(torch.from_numpy(combined))
+            blended.append(torch.from_numpy(combined).to(images.device))
 
         return torch.stack(blended)

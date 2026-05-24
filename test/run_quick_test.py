@@ -166,7 +166,7 @@ def run_phase1_limited(config, gpu_manager, file_manager, model_cache, max_image
                             
                             # Generate heatmaps
                             if config.DEVICE == "cuda":
-                                with torch.amp.autocast(config.DEVICE):
+                                with torch.amp.autocast(config.DEVICE, enabled=False):
                                     heatmaps = method.compute(model, batch_images, batch_labels)
                             else:
                                 heatmaps = method.compute(model, batch_images, batch_labels)

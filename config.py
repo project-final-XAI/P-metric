@@ -114,13 +114,13 @@ DATASET_NAME = "imagenet"
 GENERATING_MODELS = [
     "resnet50",
     "efficientnet_b0",
+    "vgg16",
     # "mobilenet_v2",
-    # "vgg16",
 
     # "vit_b_16",
     # "swin_t",
 
-    # "sipakmed_efficientnet.pth",
+    # "sipakmed_efficientnetB0.pth",
     # "sipakmed_ResNet50.pth",
 ]
 
@@ -146,17 +146,17 @@ JUDGING_MODELS = [
 # -----------------
 ATTRIBUTION_METHODS = [
     # --- Model-dependent (need the classifier) ---
-    # "saliency",
-    # "inputxgradient",
+    "saliency",
+    "inputxgradient",
     #         # "smoothgrad", cause problems with hardware
-    # "guided_backprop",
-    # "integrated_gradients",
-    # "occlusion",
-    # "gradientshap",
-    # "xrai",
-    # "grad_cam",
-    # "guided_gradcam",
-    # "random_baseline",
+    "guided_backprop",
+    "integrated_gradients",
+    "occlusion",
+    "gradientshap",
+    "xrai",
+    "grad_cam",
+    "guided_gradcam",
+    "random_baseline",
 
     # --- Model-independent (DINO / U2Net) ---
     # "dinov2_attention",
@@ -166,11 +166,14 @@ ATTRIBUTION_METHODS = [
     # "dinov2_COMBO_FIXED",
     # "dinov2_ENT",
     "dinov2_COMBO_ENT_SMOOTH",
-    "U2Net-Saliency",
-    "u2net_dino_avg_224",
-    "dino_u2net_sum_224",
-    "u2net_dino_avg_320",
-    "dino448_u2net_avg_320",
+    #
+    "dino",
+    "dino448",
+    "u2net",
+    "u2net+dino",
+    "dino+u2net_sum",
+    "u2net+dino_320",
+    "dino448+u2net",
 
     # --- Continuous wrappers ---
     # "saliency_continuous",
