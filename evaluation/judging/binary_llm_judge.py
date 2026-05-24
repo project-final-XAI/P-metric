@@ -172,10 +172,10 @@ class BinaryLLMJudge(BaseLLMJudge):
             if true_label < 0 or true_label >= len(self.class_names):
                 logging.warning(f"Invalid true_label {true_label} for image {image_id}. Using fallback.")
                 # Return consistent 8-tuple with error marker
-                return (image_id, -1, "invalid_label", "error", "unknown", occl, strategy, "")
+                return image_id, -1, "invalid_label", "error", "unknown", occl, strategy, ""
 
             # Get the true class name and format it (strips Latin names after comma)
-            class_name = self._format_class_name(self.class_names[true_label])
+            class_name = self.class_names[true_label]
 
             # Dataset-aware prompt - cognitive priming approach
             if self.dataset_name in ["SIPaKMeD", "SIPaKMeD_cropped"]:

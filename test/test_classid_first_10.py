@@ -15,8 +15,24 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import config
 from evaluation.judging.classid_llm_judge import ClassIdLLMJudge
-from data.loader import get_dataloader
-from data.imagenet_class_mapping import get_cached_mapping, format_class_for_llm
+import os
+from data.imagenet_class_mapping import get_imagenet_category_name
+
+def get_cached_mapping():
+    dataset_path = config.DATASET_CONFIG["imagenet"]["path"]
+    synset_ids = sorted([d for d in os.listdir(dataset_path) if os.path.isdir(os.path.join(dataset_path, d))])
+    mapping = {}
+    for i, synset_id in enumerate(synset_ids):
+        mapping[synset_id] = get_imagenet_category_name(i)
+    return mapping
+
+def format_class_for_llm(class_name: str) -> str:
+    if class_name is None:
+        return ""
+    if ',' in class_name:
+        class_name = class_name.split(',')[0].strip()
+    return class_name.strip()
+
 
 # Configure logging
 logging.basicConfig(

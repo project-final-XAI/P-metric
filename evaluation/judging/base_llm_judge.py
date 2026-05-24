@@ -16,7 +16,6 @@ import ollama  # Import once at module level for better performance
 
 from config import DATASET_CONFIG
 from evaluation.judging.base import JudgingModel
-from data.imagenet_class_mapping import get_cached_mapping, format_class_for_llm
 
 # Disable httpx/HTTP logging completely
 logging.getLogger("httpx").setLevel(logging.CRITICAL)
@@ -94,10 +93,7 @@ class BaseLLMJudge(JudgingModel):
         self.class_names = self._load_class_names()
         if not self.class_names:
             raise ValueError(f"Could not load class names for dataset: {dataset_name}")
-        
-        # Load ImageNet class mapping if needed
-        self.class_name_mapping = self._load_class_mapping()
-        
+
         # Log keep_alive configuration for verification
         logging.info(f"BaseLLMJudge initialized: keep_alive={OLLAMA_KEEP_ALIVE}, seed={OLLAMA_SEED}")
     
@@ -136,45 +132,6 @@ class BaseLLMJudge(JudgingModel):
                 return class_names
         
         return []
-    
-    def _load_class_mapping(self) -> Dict[str, str]:
-        """
-        Load ImageNet class mapping (synset ID -> readable name).
-        
-        Returns:
-            Dictionary mapping synset IDs to readable names, or empty dict
-        """
-        if self.dataset_name == "imagenet":
-            try:
-                mapping = get_cached_mapping()
-                logging.info(f"Loaded ImageNet class mapping with {len(mapping)} entries")
-                return mapping
-            except Exception as e:
-                logging.warning(f"Could not load ImageNet mapping: {e}")
-                return {}
-        return {}
-    
-    def _format_class_name(self, class_name: str) -> str:
-        """
-        Format class name for natural language prompt.
-        
-        Converts synset IDs to readable names for ImageNet.
-        Ensures simple English labels (strips Latin names after comma).
-        
-        Args:
-            class_name: Raw class name (e.g., 'n01440764' or 'Dyskeratotic')
-            
-        Returns:
-            Human-readable name (e.g., 'tench' or 'Dyskeratotic')
-        """
-        # Try to get readable name from mapping (for ImageNet synsets)
-        if class_name in self.class_name_mapping:
-            readable_name = self.class_name_mapping[class_name]
-            # Format for LLM: take first part if there's a comma (strips Latin names)
-            return format_class_for_llm(readable_name)
-        
-        # Replace underscores with spaces for other datasets
-        return class_name.replace('_', ' ')
     
     def _reset_ollama_model(self):
         """

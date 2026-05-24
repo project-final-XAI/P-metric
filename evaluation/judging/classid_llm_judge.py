@@ -135,13 +135,13 @@ class ClassIdLLMJudge(BaseLLMJudge):
             # Validate true_label
             if true_label < 0 or true_label >= len(self.class_names):
                 logging.warning(f"Invalid true_label {true_label} for image {image_id}. Using fallback.")
-                return (image_id, -1)
+                return image_id, -1
             
             # Build list of all categories with formatted names for system prompt
             # Format: "1: tench", "2: goldfish", etc. (1-based indexing)
             formatted_categories = []
             for i, class_name in enumerate(self.class_names):
-                formatted_name = self._format_class_name(class_name)
+                formatted_name = class_name
                 # Use 1-based indexing: class 0 becomes 1, class 1 becomes 2, etc.
                 formatted_categories.append(f"{i+1}: {formatted_name}")
             
@@ -249,8 +249,8 @@ class ClassIdLLMJudge(BaseLLMJudge):
 
             # Debug: print comparison when prediction is wrong
             if predicted != true_label:
-                true_class_name = self._format_class_name(self.class_names[true_label]) if true_label >= 0 and true_label < len(self.class_names) else "unknown"
-                predicted_class_name = self._format_class_name(self.class_names[predicted]) if predicted >= 0 and predicted < len(self.class_names) else "unknown"
+                true_class_name = self.class_names[true_label] if 0 <= true_label < len(self.class_names) else "unknown"
+                predicted_class_name = self.class_names[predicted] if 0 <= predicted < len(self.class_names) else "unknown"
                 logging.info(f"❌ MISMATCH for {image_id}: Predicted={predicted} ({predicted_class_name}) vs True={true_label} ({true_class_name})")
             else:
                 # Also log correct predictions occasionally (every 10th correct prediction to avoid spam)
@@ -258,7 +258,7 @@ class ClassIdLLMJudge(BaseLLMJudge):
                     self._correct_count = 0
                 self._correct_count += 1
                 if self._correct_count % 10 == 0:
-                    true_class_name = self._format_class_name(self.class_names[true_label]) if true_label >= 0 and true_label < len(self.class_names) else "unknown"
+                    true_class_name = self.class_names[true_label] if 0 <= true_label < len(self.class_names) else "unknown"
                     logging.debug(f"✓ Correct for {image_id}: {predicted} ({true_class_name})")
 
             return image_id, predicted

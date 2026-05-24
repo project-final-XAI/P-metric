@@ -22,7 +22,7 @@ from attribution.model_independent.dinov2_methods import (
     Dinov2AttnMethod,
     Dinov2ComboEntSmoothMethod
 )
-from attribution.model_independent.avi_methods import U2NetDinoFusionMethod
+from attribution.model_independent.avi_methods import DinoU2NetAttribution
 from attribution.model_independent.unet_based import U2NetSaliencyMethod
 
 # ---------------------------------------------------------------------------
@@ -87,7 +87,7 @@ def generate_comparison(base_path: str, n_images: int = 2) -> None:
         "dino-attention": Dinov2AttnMethod(),
         "dino-ComboEntSmooth": Dinov2ComboEntSmoothMethod(),
         "u2net": U2NetSaliencyMethod(),
-        "dino-u2net": U2NetDinoFusionMethod(),
+        "dino-u2net": DinoU2NetAttribution(),
     }
 
     for idx in range(n_images):

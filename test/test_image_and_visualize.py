@@ -15,8 +15,8 @@ from pathlib import Path
 import cv2
 
 # Import project modules
-from data.loader import get_default_transforms
-from models.loader import load_model
+from data.loader import get_base_transforms
+from models.loader import get_model_provider
 from attribution.registry import get_attribution_method
 from evaluation.occlusion import sort_pixels, apply_occlusion
 from config import DEVICE, ATTRIBUTION_METHODS
@@ -71,7 +71,7 @@ def load_and_preprocess_image(image_path: str) -> tuple[torch.Tensor, Image.Imag
     original_image = Image.open(image_path).convert("RGB")
     
     # Apply transforms
-    transform = get_default_transforms()
+    transform = get_base_transforms()
     image_tensor = transform(original_image)
     
     # Add batch dimension
@@ -444,7 +444,8 @@ if __name__ == "__main__":
     # Load model
     print(f"\n🤖 Loading model...")
     try:
-        model = load_model(MODEL_NAME)
+        provider = get_model_provider(DATASET_NAME)
+        model = provider.get_model(MODEL_NAME)
         print(f"  ✓ Model loaded: {MODEL_NAME}")
     except Exception as e:
         print(f"  ❌ Failed to load model: {e}")

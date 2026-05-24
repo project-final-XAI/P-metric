@@ -6,10 +6,12 @@ cosine similarity of embeddings. More flexible than exact matching.
 """
 import logging
 import numpy as np
-from typing import Tuple, Union
+from typing import Tuple, Union, Any
 from pathlib import Path
 
 import ollama
+from numpy import dtype, floating, ndarray
+from numpy._typing import _64Bit
 
 from evaluation.judging.base_llm_judge import BaseLLMJudge
 
@@ -97,7 +99,7 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
         Returns:
             Array of embeddings (shape: [num_classes, embedding_dim])
         """
-        formatted_names = [self._format_class_name(name) for name in self.class_names]
+        formatted_names = self.class_names
 
         try:
             # Use Ollama's embedding API
@@ -128,7 +130,7 @@ class CosineSimilarityLLMJudge(BaseLLMJudge):
             logging.error(f"Make sure Ollama embedding model '{self.embedding_model}' is available")
             raise
 
-    def _get_embedding(self, text: str) -> np.ndarray:
+    def _get_embedding(self, text: str) -> ndarray[Any, dtype[floating[_64Bit]]] | None | Any:
         """
         Get embedding for a text string.
         

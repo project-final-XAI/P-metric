@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import config
 from evaluation.judging.binary_llm_judge import BinaryLLMJudge
-from data.imagenet_class_mapping import get_cached_mapping, format_class_for_llm
+
 
 
 # Configure logging

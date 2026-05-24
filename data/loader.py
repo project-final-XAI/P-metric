@@ -158,9 +158,6 @@ def get_dataset_handler(dataset_name: str) -> BaseDatasetHandler:
 
 
 if __name__ == "__main__":
-    import time
-
-
     def test_dataset(dataset_name: str):
         print(f"\n" + "=" * 50)
         print(f" TESTING DATASET: {dataset_name}")

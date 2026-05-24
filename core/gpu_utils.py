@@ -1,47 +1,50 @@
 """
 GPU utility functions for clear separation of GPU operations from business logic.
-
-This module provides helper functions for common GPU operations like memory management,
-tensor transfers, batch size calculations, and thermal monitoring. All GPU-specific
-code is centralized here for better readability and maintainability.
+Optimized for accurate VRAM accounting and asynchronous data transfers.
 """
 
 import torch
-import logging
 from typing import List, Optional, Tuple, Union
 
+# Constant for binary Gigabyte conversion (GiB)
+_GIB = 1024 ** 3
 
-def get_memory_usage() -> Tuple[float, float]:
+
+def get_memory_usage() -> Tuple[float, float, float]:
     """
-    Get current GPU memory usage.
-    
+    Get current GPU memory metrics.
+
     Returns:
-        Tuple of (total_gb, usage_percent). Returns (0.0, 0.0) on CPU.
+        Tuple of (total_gib, allocated_percent, reserved_percent).
+        Returns (0.0, 0.0, 0.0) on CPU.
     """
     if not torch.cuda.is_available():
-        return 0.0, 0.0
-    
-    total_bytes = torch.cuda.get_device_properties(0).total_memory
-    allocated = torch.cuda.memory_allocated(0)
-    usage_percent = (allocated / total_bytes) * 100.0 if total_bytes > 0 else 0.0
-    return total_bytes / 1e9, usage_percent
+        return 0.0, 0.0, 0.0
+
+    device_id = torch.cuda.current_device()
+    total_bytes = torch.cuda.get_device_properties(device_id).total_memory
+    allocated_bytes = torch.cuda.memory_allocated(device_id)
+    reserved_bytes = torch.cuda.memory_reserved(device_id)
+
+    if total_bytes == 0:
+        return 0.0, 0.0, 0.0
+
+    allocated_pct = (allocated_bytes / total_bytes) * 100.0
+    reserved_pct = (reserved_bytes / total_bytes) * 100.0
+
+    return total_bytes / _GIB, allocated_pct, reserved_pct
 
 
 def clear_cache_if_needed(threshold_percent: float = 75.0) -> None:
     """
-    Clear CUDA cache if memory usage exceeds threshold.
-    
-    This helps prevent out-of-memory errors by freeing unused GPU memory.
-    Only clears cache if usage is above threshold to avoid unnecessary overhead.
-    
-    Args:
-        threshold_percent: Memory usage threshold (0-100) to trigger cache clear
+    Clear CUDA cache if memory reservation or allocation exceeds threshold.
     """
     if not torch.cuda.is_available():
         return
-    
-    _, usage = get_memory_usage()
-    if usage >= threshold_percent:
+
+    _, allocated_pct, reserved_pct = get_memory_usage()
+    # Check both to see if PyTorch's internal cache block footprint is getting tight
+    if max(allocated_pct, reserved_pct) >= threshold_percent:
         torch.cuda.empty_cache()
         try:
             torch.cuda.synchronize()
@@ -50,15 +53,9 @@ def clear_cache_if_needed(threshold_percent: float = 75.0) -> None:
 
 
 def sync_and_clear() -> None:
-    """
-    Synchronize GPU operations and clear cache.
-    
-    This ensures all GPU operations complete before clearing cache,
-    which helps prevent crashes during long-running operations.
-    """
+    """Synchronize GPU operations and clear cache securely."""
     if not torch.cuda.is_available():
         return
-    
     try:
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
@@ -70,47 +67,40 @@ def prepare_batch_tensor(
     images: Union[List[torch.Tensor], torch.Tensor],
     device: str,
     use_fp16: bool = False,
-    memory_format: Optional[torch.memory_format] = None
+    memory_format: Optional[torch.memory_format] = torch.channels_last
 ) -> torch.Tensor:
     """
-    Stack images into batch tensor with GPU optimizations.
-    
-    This function efficiently stacks images and applies GPU optimizations:
-    - Non-blocking transfers for better pipelining
-    - Channels-last memory format for CNNs (better TensorCore utilization)
-    - FP16 conversion if supported
-    
-    Args:
-        images: List of image tensors (each C, H, W) or an existing batch (B, C, H, W)
-        device: Target device
-        use_fp16: Whether to convert to FP16 (faster inference on modern GPUs)
-        memory_format: Optional memory format optimization
-        
-    Returns:
-        Batch tensor of shape (B, C, H, W)
+    Stack images into batch tensor with advanced pipeline optimizations.
     """
+    is_cuda = (device == "cuda" or "cuda" in str(device))
+
     if isinstance(images, torch.Tensor):
         batch_tensor = images.unsqueeze(0) if images.ndim == 3 else images
-    elif device == "cuda" and all(img.device.type == "cuda" for img in images):
-        batch_tensor = torch.stack(images)
     else:
-        batch_tensor = torch.stack(images)
+        # Fast assumption: check the first item's device instead of executing a python loop over all
+        if is_cuda and images[0].device.type == "cuda":
+            batch_tensor = torch.stack(images)
+        else:
+            # If coming from CPU, pin the stacked memory to accelerate the subsequent .to(non_blocking=True)
+            batch_tensor = torch.stack(images)
+            if is_cuda and not batch_tensor.is_pinned():
+                try:
+                    batch_tensor = batch_tensor.pin_memory()
+                except Exception:
+                    pass
 
-    if batch_tensor.device.type != device:
-        non_blocking = device == "cuda"
-        batch_tensor = batch_tensor.to(device, non_blocking=non_blocking)
-    
-    # Apply memory format optimization (channels_last improves CNN performance)
+    # Move to target device asynchronously
+    if batch_tensor.device.type != "cuda" and is_cuda:
+        batch_tensor = batch_tensor.to(device, non_blocking=True)
+    elif batch_tensor.device.type != device:
+        batch_tensor = batch_tensor.to(device)
+
+    # Convert memory layout (channels_last maximizes Tensor Core performance on modern GPUs)
     if memory_format is not None and batch_tensor.ndim == 4:
-        try:
-            batch_tensor = batch_tensor.to(memory_format=memory_format, non_blocking=True)
-        except Exception:
-            pass
-    
-    # Convert to FP16 if requested (faster inference, less memory)
-    if use_fp16 and device == "cuda":
+        batch_tensor = batch_tensor.to(memory_format=memory_format)
+
+    # Precision casting
+    if use_fp16 and is_cuda:
         batch_tensor = batch_tensor.half()
-    
+
     return batch_tensor
-
-

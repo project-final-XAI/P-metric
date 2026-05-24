@@ -20,15 +20,41 @@ import os
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from data.loader import get_dataloader, get_default_transforms
-from models.loader import load_model
+from data.loader import get_dataset_handler, get_base_transforms
+from models.loader import get_model_provider
 from attribution.registry import get_attribution_method
 from evaluation.occlusion import sort_pixels, apply_occlusion
 from evaluation.judging.binary_llm_judge import BinaryLLMJudge
-from evaluation.judging.base_llm_judge import tensor_to_pil_image
+from evaluation.judging.base_llm_judge import DEFAULT_SYSTEM_PROMPT
+
+def tensor_to_pil_image(tensor: torch.Tensor) -> Image.Image:
+    t = tensor.clone()
+    mean = torch.tensor([0.485, 0.456, 0.406], device=t.device).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], device=t.device).view(3, 1, 1)
+    t = t * std + mean
+    t = torch.clamp(t, 0.0, 1.0)
+    t = (t * 255).byte().cpu().permute(1, 2, 0).numpy()
+    return Image.fromarray(t)
+
 from config import DEVICE, DATASET_NAME, DATASET_CONFIG
-from data.imagenet_class_mapping import get_cached_mapping, format_class_for_llm
+from data.imagenet_class_mapping import get_imagenet_category_name
 import ollama
+
+def get_cached_mapping():
+    dataset_path = DATASET_CONFIG["imagenet"]["path"]
+    synset_ids = sorted([d for d in os.listdir(dataset_path) if os.path.isdir(os.path.join(dataset_path, d))])
+    mapping = {}
+    for i, synset_id in enumerate(synset_ids):
+        mapping[synset_id] = get_imagenet_category_name(i)
+    return mapping
+
+def format_class_for_llm(class_name: str) -> str:
+    if class_name is None:
+        return ""
+    if ',' in class_name:
+        class_name = class_name.split(',')[0].strip()
+    return class_name.strip()
+
 
 
 def tensor_to_displayable(tensor: torch.Tensor) -> np.ndarray:
@@ -93,7 +119,8 @@ def visualize_llm_process(
     # Step 1: Generate heatmap
     print_step_header(1, f"GENERATING HEATMAP ({attribution_method.upper()})")
     print_info(f"Loading model: {model_name}")
-    model = load_model(model_name)
+    provider = get_model_provider(dataset_name)
+    model = provider.get_model(model_name)
     model.eval()
     
     attribution_method_obj = get_attribution_method(attribution_method)
@@ -328,7 +355,8 @@ Examples:
     print_info(f"Dataset: {DATASET_NAME}")
     
     from config import DATASET_NAME
-    dataloader = get_dataloader(DATASET_NAME, batch_size=1, shuffle=False)
+    handler = get_dataset_handler(DATASET_NAME)
+    dataloader = handler.get_dataloader(batch_size=1, shuffle=False)
     
     # Get specific image
     image_idx = args.image_idx

@@ -22,11 +22,12 @@ from core.gpu_manager import GPUManager
 from core.file_manager import FileManager
 from core.phase2_runner import Phase2Runner
 from core.phase3_runner import Phase3Runner
-from models.loader import load_model
+from core.phase4_runner import Phase4Runner
+from models.loader import get_model_provider
 from evaluation.judging.registry import register_judging_model, get_judging_model
 from evaluation.judging.binary_llm_judge import BinaryLLMJudge
 from evaluation.judging.classid_llm_judge import ClassIdLLMJudge
-from data.loader import get_dataloader
+from data.loader import get_dataset_handler
 from attribution.registry import get_attribution_method
 from evaluation.occlusion import sort_pixels
 
@@ -99,7 +100,7 @@ def print_config_info(config, max_images):
     print(f"  {'Fill Strategies:':<25} {', '.join(config.FILL_STRATEGIES)}")
 
 
-def run_phase1_limited(config, gpu_manager, file_manager, model_cache, max_images):
+def run_phase1_limited(config, gpu_manager, file_manager, model_cache, max_images, dataset_handler, model_provider):
     """Run Phase 1 with image limit."""
     print_section_header("PHASE 1: HEATMAP GENERATION")
     
@@ -108,7 +109,7 @@ def run_phase1_limited(config, gpu_manager, file_manager, model_cache, max_image
     file_manager.ensure_dir_exists(heatmap_dir)
     
     logging.info("Loading dataset with image limit...")
-    dataloader = get_dataloader(dataset_name, batch_size=32, shuffle=False)
+    dataloader = dataset_handler.get_dataloader(batch_size=32, shuffle=False)
     image_label_map = {}
     global_idx = 0
     
@@ -130,7 +131,7 @@ def run_phase1_limited(config, gpu_manager, file_manager, model_cache, max_image
         for model_idx, model_name in enumerate(config.GENERATING_MODELS, 1):
             if model_name not in model_cache:
                 logging.info(f"Loading model: {model_name}")
-                model_cache[model_name] = load_model(model_name)
+                model_cache[model_name] = model_provider.get_model(model_name)
             model = model_cache[model_name]
             
             for method_idx, method_name in enumerate(config.ATTRIBUTION_METHODS, 1):
@@ -148,8 +149,9 @@ def run_phase1_limited(config, gpu_manager, file_manager, model_cache, max_image
                     labels = []
                     
                     for img_id, (img, label) in list(image_label_map.items()):
-                        sorted_path = file_manager.get_heatmap_path(
-                            dataset_name, model_name, method_name, img_id, sorted=True
+                        category_name = dataset_handler.get_category_name(label)
+                        sorted_path = file_manager.get_sorted_heatmap_path(
+                            dataset_name, model_name, method_name, img_id, category_name
                         )
                         if not sorted_path.exists():
                             images_to_process.append(img)
@@ -175,10 +177,14 @@ def run_phase1_limited(config, gpu_manager, file_manager, model_cache, max_image
                             if heatmaps is not None:
                                 for j, heatmap in enumerate(heatmaps):
                                     img_id = image_ids[i + j]
+                                    lbl = labels[i + j]
+                                    category_name = dataset_handler.get_category_name(lbl)
                                     heatmap_np = heatmap.cpu().numpy()
+                                    if heatmap_np.ndim == 3:
+                                        heatmap_np = np.mean(heatmap_np, axis=0)
                                     sorted_indices = sort_pixels(heatmap_np)
-                                    sorted_path = file_manager.get_heatmap_path(
-                                        dataset_name, model_name, method_name, img_id, sorted=True
+                                    sorted_path = file_manager.get_sorted_heatmap_path(
+                                        dataset_name, model_name, method_name, img_id, category_name
                                     )
                                     import numpy as np
                                     np.save(sorted_path, sorted_indices)
@@ -191,113 +197,25 @@ def run_phase1_limited(config, gpu_manager, file_manager, model_cache, max_image
     logging.info(f"Heatmaps saved to: {heatmap_dir}")
 
 
-def run_phase2_limited(config, gpu_manager, file_manager, model_cache, max_images):
-    """Run Phase 2 with image limit."""
+def run_phase2_limited(config, gpu_manager, file_manager, dataset_handler, model_provider):
+    """Run Phase 2."""
     print_section_header("PHASE 2: OCCLUSION EVALUATION")
-    
-    # Use the existing Phase2Runner but limit images
-    phase2_runner = Phase2Runner(config, gpu_manager, file_manager, model_cache)
-    
-    # Override _load_dataset to limit images
-    original_load_dataset = phase2_runner._load_dataset
-    
-    def limited_load_dataset(dataset_name):
-        dataloader = get_dataloader(dataset_name, batch_size=1, shuffle=False)
-        image_label_map = {}
-        for i, (img, lbl) in enumerate(dataloader):
-            if max_images and i >= max_images:
-                break
-            image_label_map[f"image_{i:05d}"] = (img, lbl.item())
-        logging.info(f"Processing {len(image_label_map)} images in Phase 2 (limited)")
-        return image_label_map
-    
-    phase2_runner._load_dataset = limited_load_dataset
-    
-    # Override _get_heatmap_groups to filter only relevant heatmaps
-    original_get_heatmap_groups = phase2_runner._get_heatmap_groups
-    
-    def filtered_get_heatmap_groups(dataset_name):
-        """Get heatmap groups filtered to only include images from limited dataset."""
-        # First get all heatmap groups
-        all_groups = original_get_heatmap_groups(dataset_name)
-        
-        # Load limited dataset to get image IDs
-        limited_image_map = limited_load_dataset(dataset_name)
-        valid_image_ids = set(limited_image_map.keys())
-        
-        # Filter heatmap groups to only include valid image IDs
-        filtered_groups = {}
-        for (gen_model, method), heatmap_paths in all_groups.items():
-            filtered_paths = []
-            for heatmap_path in heatmap_paths:
-                # Extract image ID from filename: e.g., "resnet50-grad_cam-image_00042_sorted.npy"
-                parts = heatmap_path.stem.split('-')
-                if len(parts) >= 3:
-                    # Reconstruct image ID (e.g., "image_00042")
-                    img_id = '-'.join(parts[2:]).replace('_sorted', '')
-                    if img_id in valid_image_ids:
-                        filtered_paths.append(heatmap_path)
-            
-            if filtered_paths:
-                filtered_groups[(gen_model, method)] = filtered_paths
-        
-        logging.info(f"Filtered heatmaps: {sum(len(v) for v in filtered_groups.values())} heatmaps "
-                    f"for {len(valid_image_ids)} images")
-        return filtered_groups
-    
-    phase2_runner._get_heatmap_groups = filtered_get_heatmap_groups
-    
-    # Create a proper get_cached_model function that handles LLM judges
-    def get_cached_model_func(model_name: str):
-        """Get cached model, checking registry first for LLM judges."""
-        if model_name in model_cache:
-            return model_cache[model_name]
-        
-        # Check if it's a registered judging model (LLM judge)
-        judging_model = get_judging_model(model_name)
-        if judging_model is not None:
-            logging.info(f"Loading judging model from registry: {model_name}")
-            model_cache[model_name] = judging_model
-            return judging_model
-        
-        # Check if it's an LLM judge by name pattern (fallback)
-        dataset_name = config.DATASET_NAME
-        if model_name.endswith('-binary'):
-            logging.info(f"Loading Binary LLM judge: {model_name}")
-            model_cache[model_name] = BinaryLLMJudge(
-                model_name=model_name,
-                dataset_name=dataset_name,
-                temperature=0.0
-            )
-            return model_cache[model_name]
-        elif model_name.endswith('-classid'):
-            logging.info(f"Loading ClassId LLM judge: {model_name}")
-            model_cache[model_name] = ClassIdLLMJudge(
-                model_name=model_name,
-                dataset_name=dataset_name,
-                temperature=0.0
-            )
-            return model_cache[model_name]
-        
-        # Load as PyTorch model
-        logging.info(f"Loading PyTorch model: {model_name}")
-        model = load_model(model_name)
-        model_cache[model_name] = model
-        return model
-    
-    try:
-        phase2_runner.run(get_cached_model_func)
-    finally:
-        phase2_runner._load_dataset = original_load_dataset
-        phase2_runner._get_heatmap_groups = original_get_heatmap_groups
+    phase2_runner = Phase2Runner(config, gpu_manager, file_manager, dataset_handler, model_provider)
+    phase2_runner.run()
 
 
-def run_phase3(config, file_manager):
+def run_phase3(config, gpu_manager, file_manager, dataset_handler, model_provider):
     """Run Phase 3."""
-    print_section_header("PHASE 3: ANALYSIS AND VISUALIZATION")
-    
-    phase3_runner = Phase3Runner(config, file_manager)
+    print_section_header("PHASE 3: SUPER-FAST EVALUATION")
+    phase3_runner = Phase3Runner(config, gpu_manager, file_manager, dataset_handler, model_provider)
     phase3_runner.run()
+
+
+def run_phase4(config, gpu_manager, file_manager, dataset_handler, model_provider):
+    """Run Phase 4."""
+    print_section_header("PHASE 4: ANALYSIS AND VISUALIZATION")
+    phase4_runner = Phase4Runner(config, gpu_manager, file_manager, dataset_handler, model_provider)
+    phase4_runner.run()
 
 
 def main():
@@ -315,8 +233,8 @@ Examples:
     )
     parser.add_argument('--max-images', type=int, default=MAX_IMAGES,
                        help=f'Maximum number of images (default: {MAX_IMAGES})')
-    parser.add_argument('--phase', type=int, choices=[1, 2, 3], default=None,
-                       help='Run only specific phase (1, 2, or 3)')
+    parser.add_argument('--phase', type=int, choices=[1, 2, 3, 4], default=None,
+                       help='Run only specific phase (1, 2, 3, or 4)')
     
     args = parser.parse_args()
     
@@ -334,6 +252,9 @@ Examples:
     file_manager.ensure_dir_exists(file_manager.heatmap_dir)
     file_manager.ensure_dir_exists(file_manager.results_dir)
     file_manager.ensure_dir_exists(file_manager.analysis_dir)
+    
+    dataset_handler = get_dataset_handler(config.DATASET_NAME)
+    model_provider = get_model_provider(config.DATASET_NAME)
     
     model_cache = {}
     
@@ -363,13 +284,16 @@ Examples:
     # Run phases
     try:
         if args.phase is None or args.phase == 1:
-            run_phase1_limited(config, gpu_manager, file_manager, model_cache, args.max_images)
+            run_phase1_limited(config, gpu_manager, file_manager, model_cache, args.max_images, dataset_handler, model_provider)
         
         if args.phase is None or args.phase == 2:
-            run_phase2_limited(config, gpu_manager, file_manager, model_cache, args.max_images)
+            run_phase2_limited(config, gpu_manager, file_manager, dataset_handler, model_provider)
         
         if args.phase is None or args.phase == 3:
-            run_phase3(config, file_manager)
+            run_phase3(config, gpu_manager, file_manager, dataset_handler, model_provider)
+            
+        if args.phase is None or args.phase == 4:
+            run_phase4(config, gpu_manager, file_manager, dataset_handler, model_provider)
         
         print_section_header("QUICK TEST COMPLETE")
         logging.info("All phases completed successfully!")

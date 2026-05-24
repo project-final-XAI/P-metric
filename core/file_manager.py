@@ -30,7 +30,7 @@ class FileManager:
         """Helper to build the directory path, nesting method under model if model is present."""
         if model is None:
             return self.heatmap_dir / dataset / method / subfolder
-        # CHANGED: Swapped from flat f"{model}_{method}" to nested folder model / method
+
         return self.heatmap_dir / dataset / model / method / subfolder
 
     def _build_heatmap_filename(self, img_id: str, category_name: Optional[str], ext: str) -> str:

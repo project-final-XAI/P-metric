@@ -72,17 +72,32 @@ def _render_curve_group(
         linewidth=2.5,
     )
 
+    if "mean_accuracy_top5" in group_df.columns:
+        sns.lineplot(
+            data=group_df,
+            x=x_col,
+            y="mean_accuracy_top5",
+            hue=hue_col,
+            hue_order=hue_order,
+            palette=palette,
+            marker="s",
+            linewidth=2.0,
+            linestyle="--",
+            alpha=0.7,
+            legend=False
+        )
+
     x_min = group_df[x_col].min()
     x_max = group_df[x_col].max()
     x_range = x_max - x_min
     x_padding = max(2, x_range * 0.02)
 
     plt.title(
-        f"Accuracy Degradation\nGenerator: {gen_model} | Judge: {judge_model} | Fill: {fill_strat}",
+        f"Accuracy Degradation (Solid: Top-1, Dashed: Top-5)\nGenerator: {gen_model} | Judge: {judge_model} | Fill: {fill_strat}",
         fontsize=16,
     )
     plt.xlabel("Percentage of Pixels Removed (%)", fontsize=12)
-    plt.ylabel("Top-1 Accuracy", fontsize=12)
+    plt.ylabel("Accuracy", fontsize=12)
     plt.ylim(-0.05, 1.05)
     plt.xlim(x_min - x_padding, x_max + x_padding)
     plt.legend(title=hue_col.replace("_", " ").title())
@@ -190,7 +205,11 @@ def plot_fill_strategy_comparison(
         y_col: Column name for y-axis (mean accuracy)
     """
     # Average across all models and methods, grouping only by strategy and level
-    strategy_df = results_df.groupby(['fill_strategy', x_col])[y_col].mean().reset_index()
+    agg_dict = {y_col: 'mean'}
+    if 'mean_accuracy_top5' in results_df.columns:
+        agg_dict['mean_accuracy_top5'] = 'mean'
+    
+    strategy_df = results_df.groupby(['fill_strategy', x_col]).agg(agg_dict).reset_index()
     
     # Calculate dynamic x-axis range from ACTUAL data (before adding boundary points)
     x_min = strategy_df[x_col].min()
@@ -211,13 +230,27 @@ def plot_fill_strategy_comparison(
         markersize=8
     )
     
+    if 'mean_accuracy_top5' in strategy_df.columns:
+        sns.lineplot(
+            data=strategy_df,
+            x=x_col,
+            y='mean_accuracy_top5',
+            hue='fill_strategy',
+            marker='s',
+            linewidth=2,
+            linestyle='--',
+            markersize=6,
+            alpha=0.7,
+            legend=False
+        )
+    
     plt.title(
-        "Fill Strategy Comparison\nAveraged Across All Models and Attribution Methods",
+        "Fill Strategy Comparison (Solid: Top-1, Dashed: Top-5)\nAveraged Across All Models and Attribution Methods",
         fontsize=16,
         fontweight='bold'
     )
     plt.xlabel("Percentage of Pixels Removed (%)", fontsize=14)
-    plt.ylabel("Top-1 Accuracy", fontsize=14)
+    plt.ylabel("Accuracy", fontsize=14)
     plt.ylim(-0.05, 1.05)
     plt.xlim(x_min - x_padding, x_max + x_padding)
     plt.legend(title='Fill Strategy', fontsize=12, title_fontsize=13)

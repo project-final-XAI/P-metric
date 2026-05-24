@@ -89,33 +89,36 @@ class Phase1Runner:
                 except Exception as e:
                     logging.error(f"Error executing Independent Method {method_name}: {e}", exc_info=True)
 
-            if dependent_methods:
-                for model_idx, model_name in enumerate(self.config.GENERATING_MODELS, 1):
+            for model_idx, model_name in enumerate(self.config.GENERATING_MODELS, 1):
+
+                for method_idx, method_name in enumerate(dependent_methods, 1):
+                    self.gpu_manager.check_and_throttle()
+                    logging.info(
+                        f"[{model_idx}/{len(self.config.GENERATING_MODELS)}] {model_name[:12]} | "
+                        f"[{method_idx}/{len(dependent_methods)}] {method_name[:15]}"
+                    )
+
+                    # ADD model instantiation HERE (Fresh model per method)
                     model = self.model_provider.get_model(model_name)
                     model = model.to(self.config.DEVICE)
 
-                    for method_idx, method_name in enumerate(dependent_methods, 1):
-                        self.gpu_manager.check_and_throttle()
-                        logging.info(
-                            f"[{model_idx}/{len(self.config.GENERATING_MODELS)}] {model_name[:12]} | "
-                            f"[{method_idx}/{len(dependent_methods)}] {method_name[:15]}"
+                    try:
+                        self._process_method_batch(
+                            model=model,
+                            model_name=model_name,
+                            method_name=method_name,
+                            image_label_map=image_label_map,
+                            dataset_name=dataset_name,
                         )
+                    except Exception as e:
+                        logging.error(f"Error: {model_name}-{method_name}: {e}", exc_info=True)
+                    finally:
+                        # Clean up the model immediately after the method finishes
+                        del model
+                        gc.collect()
+                        if self.config.DEVICE == "cuda":
+                            torch.cuda.empty_cache()
 
-                        try:
-                            self._process_method_batch(
-                                model=model,
-                                model_name=model_name,
-                                method_name=method_name,
-                                image_label_map=image_label_map,
-                                dataset_name=dataset_name,
-                            )
-                        except Exception as e:
-                            logging.error(f"Error: {model_name}-{method_name}: {e}", exc_info=True)
-
-                    del model
-                    gc.collect()
-                    if self.config.DEVICE == "cuda":
-                        torch.cuda.empty_cache()
 
             logging.info(f"Heatmaps successfully saved to: {heatmap_dir}")
 
@@ -213,7 +216,7 @@ class Phase1Runner:
                     self._save_heatmap_png(heatmap_np, regular_paths[i + j])
 
         self.gpu_manager.check_and_throttle()
-        clear_cache_if_needed(threshold_percent=50.0)
+        clear_cache_if_needed()
 
     def _save_heatmap_png(self, heatmap: np.ndarray, path: Path):
         """Save heatmap as PNG image with colormap."""
@@ -230,12 +233,7 @@ class Phase1Runner:
         Image.fromarray(heatmap_rgb).save(path, "PNG")
 
 
-def main():
-    """Simple main function to run Phase 1."""
+if __name__ == "__main__":
     from core._bootstrap import bootstrap_phase1
     runner = bootstrap_phase1()
     runner.run()
-
-
-if __name__ == "__main__":
-    main()

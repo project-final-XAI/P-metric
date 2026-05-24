@@ -93,10 +93,6 @@ DATASET_CONFIG = {
         "path": DATA_DIR / "imagenet",
         "num_classes": 1000
     },
-    "SIPaKMeD": {
-        "path": DATA_DIR / "SIPaKMeD",
-        "num_classes": 5
-    },
     "SIPaKMeD_cropped": {
         "path": DATA_DIR / "SIPaKMed_cropped",
         "num_classes": 5
@@ -115,7 +111,7 @@ GENERATING_MODELS = [
     "resnet50",
     "efficientnet_b0",
     "vgg16",
-    # "mobilenet_v2",
+    "mobilenet_v2",
 
     # "vit_b_16",
     # "swin_t",
@@ -126,9 +122,10 @@ GENERATING_MODELS = [
 
 # Models used for evaluating occluded images (Phase 2)
 JUDGING_MODELS = [
-    # "resnet50",
-    # "mobilenet_v2",
-    # "vgg16",
+    "resnet50",
+    "efficientnet_b0",
+    "vgg16",
+    "mobilenet_v2",
 
     # "vit_b_16",
     # "swin_t",
