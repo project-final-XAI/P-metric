@@ -1,38 +1,59 @@
-"""
-Base classes for all attribution methods.
-
-Defines the unified interface and category-specific subclasses:
-  - AttributionMethod        — abstract root (model-dependent methods)
-  - ModelIndependentMethod   — methods that ignore the classifier model
-"""
-
 from abc import ABC, abstractmethod
+from typing import Tuple, Union
 import torch
+import torch.nn.functional as F
 
 
 class AttributionMethod(ABC):
-    """Base class for all attribution methods."""
+    """Base class for all attribution methods.
 
-    def __init__(self, name: str):
+    Implements the Template Method pattern: ``compute()`` controls the
+    full lifecycle (optional resize ➜ raw attribution ➜ normalization ➜
+    upscale) while subclasses only implement ``_compute_raw``.
+    """
+
+    def __init__(self, name: str, process_size: Tuple[int, int] = (224, 224)):
+        self.process_size = process_size
         self.name = name
 
-    @abstractmethod
     def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Template method — DO NOT OVERRIDE IN SUBCLASSES.
+
+        1. Pre-process:  resize input if ``target_size`` is set.
+        2. Strategy:     call ``_compute_raw`` (subclass hook).
+        3. Normalize:    min-max per heatmap to [0, 1].
+        4. Upscale:      restore original spatial dimensions if needed.
         """
-        Compute attribution maps for a batch of images.
+        _, _, orig_h, orig_w = images.shape
 
-        Args:
-            model: Neural network model
-            images: Batch of images (B, C, H, W)
-            targets: Target class indices (B,)
+        # 1. Optional resize
+        images = F.interpolate(images, size=self.process_size, mode="bilinear", align_corners=False)
 
-        Returns:
-            Attribution heatmaps (B, H, W) normalized to [0, 1]
+        # 2. Raw attribution (subclass hook)
+        raw_attribution = self._compute_raw(model, images, targets)
+
+        # 3. Normalize
+        normalized = self._normalize_attribution(raw_attribution)
+
+        # 4. Upscale back to original resolution if needed
+        if normalized.shape[-2:] != (orig_h, orig_w):
+            normalized = normalized.unsqueeze(1)
+            normalized = F.interpolate(normalized, size=(orig_h, orig_w), mode="bilinear", align_corners=False)
+            normalized = normalized.squeeze(1)
+
+        return normalized
+
+    @abstractmethod
+    def _compute_raw(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Compute raw, unnormalized attribution maps.
+
+        Subclasses implement this. Input images are already resized to
+        ``target_size`` if that was specified.
         """
         pass
 
     def _normalize_attribution(self, attribution: torch.Tensor) -> torch.Tensor:
-        """Normalize attribution to [0, 1] range (same device as input)."""
+        """Min-max normalize attribution batches to [0, 1]."""
         att_abs = torch.abs(attribution.detach())
 
         if att_abs.ndim == 4 and att_abs.shape[1] > 1:
@@ -52,24 +73,19 @@ class AttributionMethod(ABC):
 
 
 class ModelIndependentMethod(AttributionMethod):
-    """Base for methods that don't need the classifier model (DINO, U2Net, etc.).
+    """Base for methods that don't need the classifier model (DINO, U2Net, etc.)."""
 
-    Subclasses implement ``compute_independent(images)`` instead of the full
-    three-arg ``compute``.  The ``model`` and ``targets`` arguments are
-    accepted for interface compatibility but never forwarded.
-    """
-
-    def compute(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def _compute_raw(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         return self.compute_independent(images)
 
     @abstractmethod
     def compute_independent(self, images: torch.Tensor) -> torch.Tensor:
-        """Compute attribution using only the input images.
+        """Compute raw attribution using only the input images.
 
         Args:
-            images: Batch of images (B, C, H, W)
+            images: (B, C, H, W) — already resized to target_size if applicable.
 
         Returns:
-            Attribution heatmaps (B, H, W) normalized to [0, 1]
+            Raw attribution tensor before normalization.
         """
         pass

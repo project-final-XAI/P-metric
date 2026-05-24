@@ -1,40 +1,28 @@
 """
-Phase 1: Heatmap Generation Runner  (optimized)
+Phase 1: Heatmap Generation Runner (Optimized for GPU & Streaming I/O).
 
-Key changes vs original
-------------------------
-1. Single dataset decode      – tensors + labels + orig sizes cached once, reused across all (model, method) combos.
-2. PIL size reads off-thread  – ThreadPoolExecutor reads image dims concurrently.
-3. Method instantiated once   – hoisted out of _process_method_batch.
-4. autocast gated by type     – skipped for ModelIndependentMethod subclasses.
-5. Batch D→H transfer         – single .cpu() call per batch, not per image.
-6. Async save pipeline        – np.save + PNG write submitted to a thread pool.
-7. Dir creation deduplicated  – global seen-dirs set shared across all calls.
-8. GPU sort_pixels            – torch.argsort on flattened heatmaps (single H→D transfer).
+Generates attribution heatmaps for all model-method-image combinations.
+This phase creates sorted pixel indices files that are used in Phase 2 for occlusion evaluation.
 """
 
-from __future__ import annotations
-
-import logging
-import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import nullcontext
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
-import cv2
 import numpy as np
 import torch
+import logging
+import cv2
+import gc
+from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
+from typing import Dict, Any, Optional
+from concurrent.futures import ThreadPoolExecutor
 
-from attribution.base import ModelIndependentMethod
-from attribution.registry import get_attribution_method
-from core.file_manager import FileManager
 from core.gpu_manager import GPUManager
+from core.file_manager import FileManager
 from core.gpu_utils import prepare_batch_tensor
-from data.imagenet_class_mapping import format_class_for_llm, get_cached_mapping
-from data.loader import get_dataloader
+from attribution.registry import get_attribution_method
+from attribution.base import ModelIndependentMethod
+from evaluation.occlusion import sort_pixels
+
 
 _COLORMAP_CV2 = {
     "hot": cv2.COLORMAP_HOT,
@@ -44,40 +32,6 @@ _COLORMAP_CV2 = {
     "turbo": cv2.COLORMAP_TURBO,
 }
 
-# Number of threads for async I/O (size reads + saves)
-_IO_WORKERS = min(8, (os.cpu_count() or 4))
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _read_image_size(path: str) -> Tuple[int, int]:
-    """Return (W, H) without decoding pixel data."""
-    try:
-        with Image.open(path) as im:
-            return im.size          # (W, H)
-    except Exception:
-        return (0, 0)               # caller falls back to tensor size
-
-
-def _save_sorted(path: Path, arr: np.ndarray) -> None:
-    np.save(path, arr)
-
-
-def _save_png(heatmap: np.ndarray, path: Path, colormap_key: str) -> None:
-    hmap = heatmap.copy().astype(np.float32)
-    span = hmap.max() - hmap.min()
-    hmap = (hmap - hmap.min()) / (span + 1e-8)
-    hmap_u8 = (hmap * 255).astype(np.uint8)
-    cv_cmap = _COLORMAP_CV2.get(colormap_key, cv2.COLORMAP_HOT)
-    colored = cv2.applyColorMap(hmap_u8, cv_cmap)
-    Image.fromarray(cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)).save(path, "PNG")
-
-
-# ---------------------------------------------------------------------------
-# Runner
-# ---------------------------------------------------------------------------
 
 class Phase1Runner:
     """Handles Phase 1: Heatmap generation for all model-method-image combinations."""
@@ -87,49 +41,21 @@ class Phase1Runner:
         config,
         gpu_manager: GPUManager,
         file_manager: FileManager,
-        model_cache: Dict[str, Any],
-    ) -> None:
+        dataset_handler,
+        model_provider
+    ):
         self.config = config
         self.gpu_manager = gpu_manager
         self.file_manager = file_manager
-        self.model_cache = model_cache
+        self.dataset_handler = dataset_handler
+        self.model_provider = model_provider
 
-        # Shared set so we never mkdir the same path twice across all batch calls
-        self._created_dirs: set[Path] = set()
+        # Asynchronous IO pool to prevent disk writes from blocking the GPU
+        self.io_pool = ThreadPoolExecutor(max_workers=4)
 
-        # Thread pool reused for the entire Phase-1 lifetime
-        self._io_pool = ThreadPoolExecutor(max_workers=_IO_WORKERS)
-
-        # ImageNet helpers
-        self.imagenet_mapping: Optional[dict] = None
-        self.synset_ids: List[str] = []
-        if config.DATASET_NAME == "imagenet":
-            try:
-                self.imagenet_mapping = get_cached_mapping()
-                from config import DATASET_CONFIG
-                ds_path = DATASET_CONFIG.get("imagenet", {}).get("path")
-                if ds_path and os.path.exists(ds_path):
-                    self.synset_ids = sorted(
-                        d for d in os.listdir(ds_path)
-                        if os.path.isdir(os.path.join(ds_path, d))
-                    )
-            except Exception as e:
-                logging.warning(f"Could not load ImageNet mapping: {e}")
-
-    def __del__(self) -> None:
-        self._io_pool.shutdown(wait=False)
-
-    # ------------------------------------------------------------------
-    # Public entry point
-    # ------------------------------------------------------------------
-
-    def run(self, get_cached_model_func) -> None:
+    def run(self):
+        """Generate heatmaps for all model-method-image combinations."""
         dataset_name = self.config.DATASET_NAME
-        if dataset_name not in self.config.DATASET_CONFIG:
-            raise ValueError(
-                f"Dataset '{dataset_name}' not found in DATASET_CONFIG. "
-                f"Available: {list(self.config.DATASET_CONFIG.keys())}"
-            )
 
         logging.info(f"Starting Phase 1 - Dataset: {dataset_name}")
         logging.info(
@@ -138,270 +64,191 @@ class Phase1Runner:
         )
 
         try:
+            # Ensure dataset heatmap directory exists
             heatmap_dir = self.file_manager.get_heatmap_dir(dataset_name)
-            self._ensure_dir(heatmap_dir)
+            self.file_manager.ensure_dir_exists(heatmap_dir)
 
-            # ── Single decode pass: cache (tensor, label, orig_size) ───────
-            image_records = self._build_image_records(dataset_name)
+            # Separate independent and dependent methods dynamically
+            independent_methods = []
+            dependent_methods = []
+            for method_name in self.config.ATTRIBUTION_METHODS:
+                method_instance = get_attribution_method(method_name)
+                if isinstance(method_instance, ModelIndependentMethod):
+                    independent_methods.append(method_name)
+                else:
+                    dependent_methods.append(method_name)
 
-            # ── Inference: iterate the cached tensors per (model, method) ──
-            total = len(self.config.GENERATING_MODELS) * len(self.config.ATTRIBUTION_METHODS)
-            with tqdm(total=total, desc="Phase 1 Progress") as pbar:
-                for m_idx, model_name in enumerate(self.config.GENERATING_MODELS, 1):
-                    model = get_cached_model_func(model_name)
+            # =====================================================================
+            # 1. PROCESS MODEL-INDEPENDENT METHODS
+            # =====================================================================
+            for method_name in independent_methods:
+                self.gpu_manager.check_and_throttle()
+                try:
+                    self._process_streaming(
+                        model=None,
+                        model_name=None,
+                        method_name=method_name,
+                        dataset_name=dataset_name
+                    )
+                except Exception as e:
+                    logging.error(f"Error executing Independent Method {method_name}: {e}", exc_info=True)
 
-                    for a_idx, method_name in enumerate(self.config.ATTRIBUTION_METHODS, 1):
+            # =====================================================================
+            # 2. PROCESS MODEL-DEPENDENT METHODS
+            # =====================================================================
+            if dependent_methods:
+                for model_idx, model_name in enumerate(self.config.GENERATING_MODELS, 1):
+                    # Load model
+                    model = self.model_provider.get_model(model_name)
+                    model = model.to(self.config.DEVICE)
+
+                    for method_idx, method_name in enumerate(dependent_methods, 1):
                         self.gpu_manager.check_and_throttle()
-                        pbar.set_description(
-                            f"[{m_idx}/{len(self.config.GENERATING_MODELS)}] {model_name[:12]} | "
-                            f"[{a_idx}/{len(self.config.ATTRIBUTION_METHODS)}] {method_name[:15]}"
+                        logging.info(
+                            f"[{model_idx}/{len(self.config.GENERATING_MODELS)}] {model_name[:12]} | "
+                            f"[{method_idx}/{len(dependent_methods)}] {method_name[:15]}"
                         )
+
                         try:
-                            method = get_attribution_method(method_name)
-                            self._process_method_cached(
-                                model, model_name, method, method_name,
-                                image_records, dataset_name,
+                            self._process_streaming(
+                                model=model,
+                                model_name=model_name,
+                                method_name=method_name,
+                                dataset_name=dataset_name
                             )
                         except Exception as e:
-                            logging.error(
-                                f"Error: {model_name}-{method_name}: {e}", exc_info=True
-                            )
-                        finally:
-                            pbar.update(1)
+                            logging.error(f"Error: {model_name}-{method_name}: {e}", exc_info=True)
 
-            # Wait for all background saves to finish before returning
-            self._io_pool.shutdown(wait=True)
-            self._io_pool = ThreadPoolExecutor(max_workers=_IO_WORKERS)   # re-open for safety
+                    # CRITICAL: Free GPU memory before loading the next model
+                    del model
+                    gc.collect()
+                    if self.config.DEVICE == "cuda":
+                        torch.cuda.empty_cache()
 
-            logging.info(f"Heatmaps saved to: {heatmap_dir}")
+            # Wait for all background saving threads to finish before exiting
+            self.io_pool.shutdown(wait=True)
+            logging.info(f"Heatmaps successfully saved to: {heatmap_dir}")
 
         except Exception as e:
-            logging.error(f"Phase 1 failed: {e}")
+            logging.error(f"Phase 1 execution failed: {e}")
+            self.io_pool.shutdown(wait=False)
             raise
 
-    # ------------------------------------------------------------------
-    # Single-pass dataset cache
-    # ------------------------------------------------------------------
-
-    def _build_image_records(
-        self, dataset_name: str
-    ) -> List[Tuple[str, int, Tuple[int, int], torch.Tensor]]:
-        """Decode the dataset once and cache (img_id, label, orig_size, tensor).
-
-        Returns a list ordered by global index so that downstream code can
-        rely on stable ``image_{idx:05d}`` ids.
-        """
-        loader_batch = getattr(self.config, "HEATMAP_BATCH_SIZE", 12)
-        dataloader = get_dataloader(dataset_name, batch_size=loader_batch, shuffle=False)
-        dataset_samples = getattr(dataloader.dataset, "samples", [])
-
-        # Read original image sizes concurrently (no pixel decode).
-        size_futures = {
-            self._io_pool.submit(_read_image_size, dataset_samples[i][0]): i
-            for i in range(len(dataset_samples))
-        }
-        orig_sizes: Dict[int, Tuple[int, int]] = {}
-        for fut in as_completed(size_futures):
-            idx = size_futures[fut]
-            orig_sizes[idx] = fut.result()
-
-        records: List[Tuple[str, int, Tuple[int, int], torch.Tensor]] = []
-        global_idx = 0
-        for batch_images, batch_labels in dataloader:
-            # ``batch_images`` is a (B, C, H, W) tensor; clone rows so we can
-            # release the underlying batch storage at the end of each iter.
-            for img, lbl in zip(batch_images, batch_labels):
-                raw_size = orig_sizes.get(global_idx, (0, 0))
-                if raw_size == (0, 0):
-                    raw_size = (img.shape[-1], img.shape[-2])   # (W, H)
-                records.append(
-                    (
-                        f"image_{global_idx:05d}",
-                        lbl.item(),
-                        raw_size,
-                        img.detach().clone(),
-                    )
-                )
-                global_idx += 1
-
-        logging.info(f"Cached {len(records)} dataset images for Phase 1.")
-        return records
-
-    # ------------------------------------------------------------------
-    # Core processor: iterates the cached image records
-    # ------------------------------------------------------------------
-
-    def _process_method_cached(
+    def _process_streaming(
         self,
-        model: Any,
-        model_name: str,
-        method: Any,
+        model: Optional[Any],
+        model_name: Optional[str],
         method_name: str,
-        image_records: List[Tuple[str, int, Tuple[int, int], torch.Tensor]],
-        dataset_name: str,
-    ) -> None:
-        """Run a single attribution method against every cached image."""
+        dataset_name: str
+    ):
+        """
+        Streams batches from the DataLoader directly into the GPU, skipping
+        images that have already been processed to allow resume-capability.
+        """
+        method = get_attribution_method(method_name)
 
+        # Request a fresh dataloader configured to the optimal batch size for this method
         batch_size = self.gpu_manager.get_batch_size(method_name)
-        colormap_key = getattr(self.config, "HEATMAP_COLORMAP", "hot").lower()
+        dataloader = self.dataset_handler.get_dataloader(batch_size=batch_size, shuffle=False)
 
-        # Determine whether AMP autocast applies for this method type
-        use_autocast = (
-            self.config.DEVICE == "cuda"
-            and not isinstance(method, ModelIndependentMethod)
-        )
-        amp_ctx = (
-            torch.amp.autocast(self.config.DEVICE) if use_autocast else nullcontext()
-        )
+        global_idx = 0
+        seen_dirs = set()
 
-        # Rebuild per-image path info (needed to decide what to skip)
-        path_meta: List[Tuple[Path, Path]] = []
-        for img_id, label, _, _ in image_records:
-            cat = self._category_name_for_label(dataset_name, label)
-            s = self.file_manager.get_sorted_heatmap_path(
-                dataset_name, model_name, method_name, img_id, cat
-            )
-            r = self.file_manager.get_regular_heatmap_path(
-                dataset_name, model_name, method_name, img_id, cat
-            )
-            path_meta.append((s, r))
+        for batch_images, batch_labels in tqdm(dataloader, desc=f"  → Processing {method_name}", dynamic_ncols=True):
+            current_batch_size = len(batch_images)
 
-        # Collect outstanding work (skip already-saved combinations)
-        pending_meta_idx: List[int] = [
-            i for i, (s, r) in enumerate(path_meta) if not s.exists() or not r.exists()
-        ]
-        if not pending_meta_idx:
-            return
+            valid_indices = []
+            batch_s_paths = []
+            batch_r_paths = []
 
-        # Iterate the in-memory cache in batches sized for the GPU.
-        for batch_start in tqdm(
-            range(0, len(pending_meta_idx), batch_size),
-            desc=f"  → {method_name[:20]}",
-            dynamic_ncols=True,
-            leave=False,
-        ):
-            batch_idxs = pending_meta_idx[batch_start: batch_start + batch_size]
-            if batch_start > 0 and (batch_start % (batch_size * 5)) == 0:
-                self.gpu_manager.check_and_throttle()
+            # 1. Pre-computation Filter: Check which images actually need processing
+            for i in range(current_batch_size):
+                img_id = f"image_{global_idx + i:05d}"
+                label = batch_labels[i].item()
+                category_name = self.dataset_handler.get_category_name(label)
 
-            self._flush_batch(
-                batch_idxs,
-                image_records,
-                path_meta,
-                model,
-                method,
-                amp_ctx,
-                colormap_key,
-            )
+                s_path = self.file_manager.get_sorted_heatmap_path(dataset_name, model_name, method_name, img_id, category_name)
+                r_path = self.file_manager.get_regular_heatmap_path(dataset_name, model_name, method_name, img_id, category_name)
 
-        self.gpu_manager.check_and_throttle()
+                if not s_path.exists() or not r_path.exists():
+                    valid_indices.append(i)
+                    batch_s_paths.append(s_path)
+                    batch_r_paths.append(r_path)
 
-    # ------------------------------------------------------------------
-    # Single-batch flush (inference + GPU sort + async save)
-    # ------------------------------------------------------------------
+                    # Ensure directory exists once
+                    if s_path.parent not in seen_dirs:
+                        self.file_manager.ensure_dir_exists(s_path.parent)
+                        seen_dirs.add(s_path.parent)
 
-    def _flush_batch(
-        self,
-        idxs: List[int],
-        image_records: List[Tuple[str, int, Tuple[int, int], torch.Tensor]],
-        path_meta: List[Tuple[Path, Path]],
-        model: Any,
-        method: Any,
-        amp_ctx,
-        colormap_key: str,
-    ) -> None:
-        if not idxs:
-            return
+            global_idx += current_batch_size
 
-        # Pre-create dirs (deduplicated globally)
-        for i in idxs:
-            for p in path_meta[i]:
-                self._ensure_dir(p.parent)
+            # Skip GPU computation if all images in this batch already exist on disk
+            if not valid_indices:
+                continue
 
-        imgs = [image_records[i][3] for i in idxs]
-        batch_tensor = prepare_batch_tensor(
-            imgs,
-            device=self.config.DEVICE,
-            memory_format=torch.channels_last,
-        )
-        batch_labels = torch.as_tensor(
-            [image_records[i][1] for i in idxs],
-            dtype=torch.long,
-        ).to(self.config.DEVICE, non_blocking=True)
+            # 2. Filter tensors to only the ones we need to compute
+            sub_batch_images = batch_images[valid_indices]
+            sub_batch_labels = batch_labels[valid_indices]
 
-        with amp_ctx:
-            heatmaps = method.compute(model, batch_tensor, batch_labels)
-        if heatmaps is None:
-            return
+            # 3. GPU Processing
+            sub_batch_images = prepare_batch_tensor(sub_batch_images, device=self.config.DEVICE, memory_format=torch.channels_last)
+            sub_batch_labels = sub_batch_labels.to(self.config.DEVICE, non_blocking=True)
 
-        # Reduce channel dim if present so heatmaps are (B, H, W).
-        if heatmaps.ndim == 4:
-            heatmaps = heatmaps.mean(dim=1)
-        elif heatmaps.ndim != 3:
-            raise ValueError(f"Unexpected heatmap shape {tuple(heatmaps.shape)}")
-
-        B, H, W = heatmaps.shape
-
-        # GPU sort: argsort flattened heatmaps in one shot, then transfer once.
-        # ``np.argsort`` orders ascending, which matches the legacy behaviour;
-        # we do the same with ``torch.argsort`` (ascending by default).
-        sorted_idx_gpu = torch.argsort(heatmaps.reshape(B, -1), dim=1)
-        sorted_idx_np: np.ndarray = sorted_idx_gpu.to(dtype=torch.int64).cpu().numpy()
-
-        # Single D→H transfer for the heatmap values themselves.
-        heatmaps_np: np.ndarray = heatmaps.detach().cpu().numpy()  # (B, H, W)
-
-        for j, h_np in enumerate(heatmaps_np):
-            meta_i = idxs[j]
-            orig_w, orig_h = image_records[meta_i][2]
-            sorted_path, regular_path = path_meta[meta_i]
-
-            sorted_indices = sorted_idx_np[j]
-
-            # Resize for the visualisation only; the .npy stays at model res.
-            if orig_w > 0 and orig_h > 0 and (h_np.shape[1], h_np.shape[0]) != (orig_w, orig_h):
-                h_png = cv2.resize(
-                    h_np.astype(np.float32),
-                    (orig_w, orig_h),
-                    interpolation=cv2.INTER_LINEAR,
-                )
+            if self.config.DEVICE == "cuda":
+                with torch.amp.autocast(self.config.DEVICE):
+                    heatmaps = method.compute(model, sub_batch_images, sub_batch_labels)
             else:
-                h_png = h_np
+                heatmaps = method.compute(model, sub_batch_images, sub_batch_labels)
 
-            self._io_pool.submit(_save_sorted, sorted_path, sorted_indices)
-            self._io_pool.submit(_save_png, h_png.copy(), regular_path, colormap_key)
+            # 4. Dispatch CPU-bound saving tasks to background threads
+            if heatmaps is not None:
+                heatmaps_np = heatmaps.cpu().numpy()
+                for j, heatmap_np in enumerate(heatmaps_np):
 
-    # ------------------------------------------------------------------
-    # Utilities
-    # ------------------------------------------------------------------
+                    if heatmap_np.ndim == 3:
+                        heatmap_np = np.mean(heatmap_np, axis=0)
 
-    def _ensure_dir(self, path: Path) -> None:
-        if path not in self._created_dirs:
-            self.file_manager.ensure_dir_exists(path)
-            self._created_dirs.add(path)
+                    # Submit to background thread so GPU can move to next batch instantly
+                    self.io_pool.submit(
+                        self._process_and_save_outputs,
+                        heatmap_np,
+                        batch_s_paths[j],
+                        batch_r_paths[j]
+                    )
 
-    def _category_name_for_label(self, dataset_name: str, label: int) -> Optional[str]:
-        if dataset_name != "imagenet" or not self.imagenet_mapping or not self.synset_ids:
-            return None
+            # Thermal check after every processed batch
+            self.gpu_manager.check_and_throttle()
+
+    def _process_and_save_outputs(self, heatmap: np.ndarray, sorted_path: Path, regular_path: Path):
+        """
+        Background worker task: Handles sorting pixels, generating images, and saving to disk.
+        """
         try:
-            if label < len(self.synset_ids):
-                full = self.imagenet_mapping.get(self.synset_ids[label], "")
-                if full:
-                    return format_class_for_llm(full)
+            # 1. Sort and save indices
+            sorted_indices = sort_pixels(heatmap)
+            np.save(sorted_path, sorted_indices)
+
+            # 2. Generate and save colored PNG
+            hmap = heatmap.copy()
+            hmap = (hmap - hmap.min()) / (hmap.max() - hmap.min() + 1e-8)
+            hmap_uint8 = (hmap * 255).astype(np.uint8)
+
+            colormap = getattr(self.config, 'HEATMAP_COLORMAP', 'hot')
+            cv_colormap = _COLORMAP_CV2.get(colormap.lower(), cv2.COLORMAP_HOT)
+
+            heatmap_colored = cv2.applyColorMap(hmap_uint8, cv_colormap)
+            heatmap_rgb = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
+
+            Image.fromarray(heatmap_rgb).save(regular_path, 'PNG')
         except Exception as e:
-            logging.debug(f"Could not get category name for label {label}: {e}")
-        return None
+            logging.error(f"Background thread failed to save {regular_path.name}: {e}")
 
 
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
-
-def main() -> None:
-    from core._bootstrap import bootstrap_runner
-    config, gpu_manager, file_manager, model_cache, get_cached_model = bootstrap_runner()
-    runner = Phase1Runner(config, gpu_manager, file_manager, model_cache)
-    runner.run(get_cached_model)
+def main():
+    """Simple main function to run Phase 1."""
+    from core._bootstrap import bootstrap_phase1
+    runner = bootstrap_phase1()
+    runner.run()
 
 
 if __name__ == "__main__":

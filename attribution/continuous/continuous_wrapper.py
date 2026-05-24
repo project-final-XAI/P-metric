@@ -55,3 +55,7 @@ class ContinuousWrapper(AttributionMethod):
         raw = self._base.compute(model, images, targets)
         smoothed = self._gaussian_smooth(raw)
         return self._normalize_attribution(smoothed.unsqueeze(1)).squeeze(1)
+
+    def _compute_raw(self, model, images: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError("ContinuousWrapper is a wrapper; use compute() directly.")
+

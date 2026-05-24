@@ -25,4 +25,3 @@ from attribution.model_dependent.other import (
     GuidedBackpropMethod,
     RandomBaselineMethod,
 )
-from attribution.model_dependent.c3f import C3FMethod
