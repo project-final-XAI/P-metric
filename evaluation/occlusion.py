@@ -16,14 +16,6 @@ from config import DEVICE
 # -----------------
 # Fill Strategy Implementations
 # -----------------
-
-def _fill_gray(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Fill masked area with solid gray color."""
-    occluded_image = image.clone()
-    occluded_image[:, mask] = 0.5
-    return occluded_image
-
-
 def _fill_blur(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """Fill masked area with blurred version of image."""
     blur_transform = transforms.GaussianBlur(kernel_size=21, sigma=10)
@@ -176,53 +168,6 @@ def apply_occlusion(
     return occluded_image
 
 
-def apply_occlusion_batch(
-    images: list[torch.Tensor],
-    sorted_pixel_indices_list: list[np.ndarray],
-    occlusion_level: int,
-    strategy: str,
-    image_shape: Tuple[int, int] = (224, 224)
-) -> list[torch.Tensor]:
-    """
-    Apply occlusion to a batch of images efficiently using vectorized operations.
-
-    This is the legacy list-based API. Internally it stacks the inputs and
-    forwards to :func:`apply_fill_to_batch` so callers built around lists keep
-    working. New callers should prefer the lower-overhead pair
-    :func:`build_occlusion_mask_batch` + :func:`apply_fill_to_batch`.
-    """
-    if strategy not in FILL_STRATEGY_REGISTRY:
-        raise ValueError(f"Fill strategy '{strategy}' is not recognized.")
-
-    if not (0 <= occlusion_level <= 100):
-        raise ValueError("Occlusion level must be between 0 and 100.")
-
-    if len(images) == 0:
-        return []
-
-    total_pixels = image_shape[0] * image_shape[1]
-    num_pixels_to_occlude = int(total_pixels * (occlusion_level / 100.0))
-
-    if num_pixels_to_occlude == 0:
-        return [img.clone() for img in images]
-
-    device = DEVICE
-
-    if all(img.device.type == device for img in images):
-        batch_tensor = torch.stack(images, dim=0)
-    else:
-        batch_tensor = torch.stack(
-            [img.to(device, non_blocking=True) for img in images], dim=0
-        )
-
-    masks = build_occlusion_mask_batch(
-        sorted_pixel_indices_list, occlusion_level, image_shape, device=device
-    )
-
-    occluded_batch = apply_fill_to_batch(batch_tensor, masks, strategy)
-    return [occluded_batch[i] for i in range(occluded_batch.shape[0])]
-
-
 def build_occlusion_mask_batch(
     sorted_pixel_indices_list: list[np.ndarray],
     occlusion_level: int,
@@ -282,7 +227,7 @@ def apply_fill_to_batch(
     """Apply a fill strategy to a stacked (B, C, H, W) batch in one shot.
 
     For ``gray/black/white/random_noise/mean`` we use ``torch.where`` so the
-    whole batch is processed in a single vectorised operation. ``blur`` still
+    whole batch is processed in a single vectorized operation. ``blur`` still
     iterates per image because its kernel depends on the image content.
     """
     if strategy not in FILL_STRATEGY_REGISTRY:

@@ -15,7 +15,7 @@ from attribution._shared import DEVICE, get_cached_model
 # Configuration & Paths
 # ---------------------------------------------------------------------------
 
-_U2NET_SIZE = (224, 224)
+_U2NET_SIZE = (320, 320)
 
 _IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406])
 _IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225])

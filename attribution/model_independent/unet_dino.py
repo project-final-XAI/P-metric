@@ -17,6 +17,7 @@ import config
 from attribution.base import ModelIndependentMethod
 from attribution._shared import DEVICE, get_cached_model
 from attribution.model_independent.unet_based import U2NetSaliencyMethod
+from attribution.model_independent.dinov2_methods import Dinov2TriSignalGuidedMethod
 
 DINO_MODEL_NAME = getattr(config, "DINO_MODEL_NAME", "facebook/dinov2-with-registers-base")
 PRODUCT_SMOOTHING = float(getattr(config, "DINO_PRODUCT_SMOOTHING", 0.05))
@@ -240,3 +241,124 @@ class U2NetDinoProductMethod(ModelIndependentMethod):
             fused_maps.append(torch.from_numpy(fused).to(device=images.device, dtype=images.dtype).unsqueeze(0))
 
         return torch.stack(fused_maps, dim=0)
+
+
+def _resize_np_float_map(arr: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
+    img = Image.fromarray(arr.astype(np.float32), mode="F")
+    return np.array(img.resize((out_w, out_h), Image.BILINEAR), dtype=np.float32)
+
+
+def _norm01(arr: np.ndarray) -> np.ndarray:
+    arr = np.asarray(arr, dtype=np.float32)
+    lo, hi = float(arr.min()), float(arr.max())
+    if hi > lo:
+        return (arr - lo) / (hi - lo)
+    return np.zeros_like(arr, dtype=np.float32)
+
+
+class Stage1StyleU2NetDinoHybridMethod(ModelIndependentMethod):
+    """Stage1-style DINO+U2Net hybrid variants."""
+
+    def __init__(
+        self,
+        method_name: str,
+        dino_input_size: int = 448,
+        dino_output_size: int = 224,
+        dino_hi_res_guided_filter: bool = False,
+        combine_size: int = 224,
+        combine_mode: str = "norm_sum",
+    ) -> None:
+        super().__init__(method_name)
+        self._u2net = U2NetSaliencyMethod()
+        self._dino = Dinov2TriSignalGuidedMethod(
+            dino_input_size=dino_input_size,
+            output_size=dino_output_size,
+            hi_res_guided_filter=dino_hi_res_guided_filter,
+            guided_filter_radius=8,
+            guided_filter_eps=1e-2,
+            use_flip_tta=True,
+        )
+        self.combine_size = int(combine_size)
+        self.combine_mode = combine_mode
+
+    def compute_independent(self, images: torch.Tensor) -> torch.Tensor:
+        B, _, H, W = images.shape
+        dino_maps = self._dino.compute_independent(images)   # (B, 1, H, W)
+        u2_maps = self._u2net.compute_independent(images)    # (B, 1, H, W)
+
+        out = []
+        for i in range(B):
+            dino_np = dino_maps[i, 0].detach().cpu().numpy().astype(np.float32)
+            u2_np = u2_maps[i, 0].detach().cpu().numpy().astype(np.float32)
+
+            dino_c = _resize_np_float_map(dino_np, self.combine_size, self.combine_size)
+            u2_c = _resize_np_float_map(u2_np, self.combine_size, self.combine_size)
+
+            if self.combine_mode == "clamped_sum":
+                hm = np.clip(dino_c + u2_c, 0.0, 1.0).astype(np.float32)
+            else:
+                hm = _norm01(dino_c + u2_c)
+
+            if hm.shape != (H, W):
+                hm = _resize_np_float_map(hm, H, W)
+                hm = _norm01(hm)
+
+            out.append(torch.from_numpy(hm).to(device=images.device, dtype=images.dtype).unsqueeze(0))
+
+        return torch.stack(out, dim=0)
+
+
+class U2NetDinoAvg224Method(Stage1StyleU2NetDinoHybridMethod):
+    """Stage1 `u2net+dino`: sum and normalize on 224 grid."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            method_name="u2net_dino_avg_224",
+            dino_input_size=448,
+            dino_output_size=224,
+            dino_hi_res_guided_filter=False,
+            combine_size=224,
+            combine_mode="norm_sum",
+        )
+
+
+class DINOU2NetClampedSum224Method(Stage1StyleU2NetDinoHybridMethod):
+    """Stage1 `dino+u2net_sum`: clipped sum on 224 grid."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            method_name="dino_u2net_sum_224",
+            dino_input_size=448,
+            dino_output_size=224,
+            dino_hi_res_guided_filter=False,
+            combine_size=224,
+            combine_mode="clamped_sum",
+        )
+
+
+class U2NetDinoAvg320Method(Stage1StyleU2NetDinoHybridMethod):
+    """Stage1 `u2net+dino_320`: sum and normalize on 320 grid."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            method_name="u2net_dino_avg_320",
+            dino_input_size=448,
+            dino_output_size=224,
+            dino_hi_res_guided_filter=False,
+            combine_size=320,
+            combine_mode="norm_sum",
+        )
+
+
+class DINO448U2NetAvg320Method(Stage1StyleU2NetDinoHybridMethod):
+    """Stage1 `dino448+u2net`: hi-res guided DINO + U2Net on 320 grid."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            method_name="dino448_u2net_avg_320",
+            dino_input_size=448,
+            dino_output_size=224,
+            dino_hi_res_guided_filter=True,
+            combine_size=320,
+            combine_mode="norm_sum",
+        )
