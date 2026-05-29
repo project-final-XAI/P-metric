@@ -95,15 +95,15 @@ FILL_STRATEGY_REGISTRY: Dict[str, Callable[[torch.Tensor, torch.Tensor], torch.T
 
 def sort_pixels(heatmap: np.ndarray) -> np.ndarray:
     """
-    Sort pixel indices from least to most important based on heatmap.
+    Sort pixel indices from least to most important based on heatmap magnitude.
     
     Args:
         heatmap: 2D numpy array representing attribution map
         
     Returns:
-        Flattened array of pixel indices sorted by attribution value (ascending)
+        Flattened array of pixel indices sorted by attribution magnitude (ascending)
     """
-    return np.argsort(heatmap.flatten())
+    return np.argsort(np.abs(heatmap.flatten()))
 
 
 def apply_occlusion(
