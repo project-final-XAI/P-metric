@@ -112,7 +112,7 @@ GENERATING_MODELS = [
     "efficientnet_b0",
     "vgg16",
     "mobilenet_v2",
-
+    #
     # "vit_b_16",
     # "swin_t",
 
@@ -143,19 +143,16 @@ JUDGING_MODELS = [
 # -----------------
 ATTRIBUTION_METHODS = [
     # --- Model-dependent (need the classifier) ---
+    "grad_cam",
     "saliency",
     "inputxgradient",
-    #         # "smoothgrad", cause problems with hardware
+    "smoothgrad",
     "guided_backprop",
     "integrated_gradients",
     "occlusion",
     "gradientshap",
-    "xrai",
-    "grad_cam",
-    "guided_gradcam",
-    "random_baseline",
-
-    # --- Model-independent (DINO / U2Net) ---
+    #
+    # endent (DINO / U2Net) ---
     # "dinov2_attention",
     # "dinov2_PC1",
     # "dinov2_PC_EV",
@@ -214,15 +211,16 @@ DINO_ATTN_IMPLEMENTATION = "eager"
 # -----------------
 # Occlusion levels (percentages) to evaluate
 OCCLUSION_LEVELS = list[int](range(0, 105, 5))
+# OCCLUSION_LEVELS = [20,40,60,90]
 
 # Fill strategies for occluded pixels
 FILL_STRATEGIES = [
     "gray",
-    "blur",
-    "random_noise",
+    # "blur",
+    # "random_noise",
     "black",
     "mean",
-    "white",
+    # "white",
 ]
 
 # -----------------

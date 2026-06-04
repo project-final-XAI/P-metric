@@ -62,7 +62,7 @@ class GPUManager:
 
     def _calculate_optimal_batches(self) -> Dict[str, int]:
         base_sizes = {
-            "saliency": 64, "inputxgradient": 64, "smoothgrad": 24,
+            "saliency": 64, "inputxgradient": 64, "smoothgrad": 8,
             "guided_backprop": 64, "integrated_gradients": 16, "gradientshap": 8,
             "occlusion": 24, "xrai": 4, "grad_cam": 32, "guided_gradcam": 32,
             "random_baseline": 128,

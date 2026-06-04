@@ -271,6 +271,29 @@ class DinoAttribution(ModelIndependentMethod):
         return _ensure_dino()
 
     def compute_independent(self, images: torch.Tensor) -> torch.Tensor:
+        paths = getattr(self, "current_paths", None)
+        if paths is not None:
+            model = self._get_model()
+            heatmaps = []
+            to_tensor = transforms.ToTensor()
+            for path in paths:
+                img_pil_orig = Image.open(path).convert("RGB")
+                img_pil = img_pil_orig.resize((224, 224), Image.LANCZOS)
+                guide_224 = to_tensor(img_pil).unsqueeze(0).to(DEVICE)
+                x_448 = to_tensor(img_pil_orig.resize((self.dino_size, self.dino_size), Image.LANCZOS)).unsqueeze(0).to(DEVICE)
+                x_448_norm = _imagenet_normalize(x_448)
+                hm = _dino_single_pass(model, x_448_norm, guide_224, self.gf_radius)
+                if self.tta_flip:
+                    xi_f = torch.flip(x_448_norm, dims=[-1])
+                    gi_f = torch.flip(guide_224, dims=[-1])
+                    hm_f = _dino_single_pass(model, xi_f, gi_f, self.gf_radius)
+                    hm_f = torch.flip(hm_f, dims=[-1])
+                    hm   = (hm + hm_f) * 0.5
+                    lo, hi_v = hm.min(), hm.max()
+                    hm   = (hm - lo) / (hi_v - lo + 1e-8)
+                heatmaps.append(hm.squeeze().to(images.device))
+            return torch.stack(heatmaps)
+
         B, C, H, W = images.shape
         guide = _denormalize_imagenet(images)
         x_dino_rgb = _resize_batch(guide, self.dino_size)
@@ -321,6 +344,33 @@ class U2NetAttribution(ModelIndependentMethod):
         return _ensure_u2net()
 
     def compute_independent(self, images: torch.Tensor) -> torch.Tensor:
+        paths = getattr(self, "current_paths", None)
+        if paths is not None:
+            u2net = self._get_model()
+            model_device = next(u2net.parameters()).device
+            heatmaps = []
+            _no_amp = (
+                torch.amp.autocast("cuda", enabled=False)
+                if model_device.type == "cuda"
+                else nullcontext()
+            )
+            for path in paths:
+                img_pil_orig = Image.open(path).convert("RGB")
+                img_320 = img_pil_orig.resize((self.u2net_size, self.u2net_size), Image.BILINEAR)
+                inp = np.array(img_320, dtype=np.float32) / 255.0
+                mean_np = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+                std_np  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+                inp = (inp - mean_np) / std_np
+                tensor = torch.from_numpy(inp.transpose(2, 0, 1)).unsqueeze(0).to(model_device)
+                with torch.no_grad(), _no_amp:
+                    pred = u2net(tensor)
+                alpha = pred.squeeze().cpu().numpy().astype(np.float64)
+                if self.smooth_sigma > 0:
+                    alpha = gaussian_filter(alpha, sigma=self.smooth_sigma)
+                alpha = _norm01(alpha).astype(np.float32)
+                heatmaps.append(torch.from_numpy(alpha).to(images.device))
+            return torch.stack(heatmaps)
+
         B, C, H, W = images.shape
         u2net = self._get_model()
         model_device = next(u2net.parameters()).device
@@ -427,6 +477,29 @@ class Dino448Attribution(DinoAttribution):
         self.name = "dino448"
 
     def compute_independent(self, images: torch.Tensor) -> torch.Tensor:
+        paths = getattr(self, "current_paths", None)
+        if paths is not None:
+            model = self._get_model()
+            heatmaps = []
+            to_tensor = transforms.ToTensor()
+            for path in paths:
+                img_pil_orig = Image.open(path).convert("RGB")
+                guide_448 = to_tensor(img_pil_orig.resize((self.dino_size, self.dino_size), Image.LANCZOS)).unsqueeze(0).to(DEVICE)
+                x_448_norm = _imagenet_normalize(guide_448)
+                base_out_size = 224
+                gf_r = round(self.gf_radius * self.dino_size / base_out_size)
+                hm = _dino_single_pass(model, x_448_norm, guide_448, gf_r)
+                if self.tta_flip:
+                    xi_f = torch.flip(x_448_norm, dims=[-1])
+                    gi_f = torch.flip(guide_448, dims=[-1])
+                    hm_f = _dino_single_pass(model, xi_f, gi_f, gf_r)
+                    hm_f = torch.flip(hm_f, dims=[-1])
+                    hm   = (hm + hm_f) * 0.5
+                    lo, hi_v = hm.min(), hm.max()
+                    hm   = (hm - lo) / (hi_v - lo + 1e-8)
+                heatmaps.append(hm.squeeze().to(images.device))
+            return torch.stack(heatmaps)
+
         B = images.shape[0]
         guide = _denormalize_imagenet(images)
         guide_hi   = _resize_batch(guide, self.dino_size)
@@ -537,6 +610,10 @@ class Dino448U2NetAttribution(ModelIndependentMethod):
         self._u2net   = U2NetAttribution()
 
     def compute_independent(self, images: torch.Tensor) -> torch.Tensor:
+        paths = getattr(self, "current_paths", None)
+        if paths is not None:
+            self._dino448.current_paths = paths
+            self._u2net.current_paths = paths
         B = images.shape[0]
 
         # Pull high-resolution DINO map (448x448) and downsample to 320x320

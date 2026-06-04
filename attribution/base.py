@@ -49,23 +49,15 @@ class AttributionMethod(ABC):
         pass
 
     def _normalize_attribution(self, attribution: torch.Tensor) -> torch.Tensor:
-        """Min-max normalize attribution batches to [0, 1]."""
-        att_abs = torch.abs(attribution.detach())
+        att = attribution.detach().abs()
 
-        if att_abs.ndim == 4 and att_abs.shape[1] > 1:
-            att_abs = torch.mean(att_abs, dim=1)
-        elif att_abs.ndim == 4 and att_abs.shape[1] == 1:
-            att_abs = att_abs.squeeze(1)
+        if att.ndim == 4:
+            att = att.mean(dim=1)
 
-        normalized = []
-        for heatmap in att_abs:
-            min_val, max_val = heatmap.min(), heatmap.max()
-            if max_val > min_val:
-                normalized.append((heatmap - min_val) / (max_val - min_val))
-            else:
-                normalized.append(heatmap)
+        mins = att.amin(dim=(-2, -1), keepdim=True)
+        maxs = att.amax(dim=(-2, -1), keepdim=True)
 
-        return torch.stack(normalized)
+        return (att - mins) / (maxs - mins + 1e-8)
 
 
 class ModelIndependentMethod(AttributionMethod):

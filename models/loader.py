@@ -56,11 +56,17 @@ class PretrainedModelProvider(BaseModelProvider):
 
         try:
             # Modern torchvision weights API
-            model = models.get_model(model_name, weights="DEFAULT")
+            weights = models.get_model_weights(model_name).DEFAULT
+            model = models.get_model(model_name, weights=weights)
+            model.weights = weights
+            model.transforms = weights.transforms()
         except Exception:
             try:
                 import timm
                 model = timm.create_model(model_name, pretrained=True)
+                import timm.data
+                data_config = timm.data.resolve_model_data_config(model)
+                model.transforms = timm.data.create_transform(**data_config, is_training=False)
             except Exception as e:
                 raise ValueError(f"Model '{model_name}' not found in torchvision or timm: {e}")
 
@@ -73,9 +79,10 @@ class PretrainedModelProvider(BaseModelProvider):
 class CustomModelProvider(BaseModelProvider):
     """Loads custom-trained models from local .pth weight files for SIPaKMeD."""
 
-    def __init__(self, num_classes: int = 5) -> None:
+    def __init__(self, num_classes: int = 5, dataset_name: str = "SIPaKMeD_cropped") -> None:
         self._cache: dict[str, nn.Module] = {}
         self.num_classes = num_classes
+        self._dataset_name = dataset_name
 
     def get_model(self, model_name: str) -> nn.Module:
         if model_name in self._cache:
@@ -148,6 +155,8 @@ class CustomModelProvider(BaseModelProvider):
             model = checkpoint
 
         model = _prepare_model(model)
+        from data.loader import get_clf_transform
+        model.transforms = get_clf_transform(self._dataset_name)
         self._cache[model_name] = model
         logging.info(f"CustomModelProvider: loaded '{model_name}' from {weights_path}")
         return model
@@ -182,6 +191,6 @@ def get_model_provider(dataset_name: str) -> BaseModelProvider:
     if dataset_name == "imagenet":
         return PretrainedModelProvider()
     elif dataset_name in ("SIPaKMeD", "SIPaKMeD_cropped"):
-        return CustomModelProvider(num_classes=5)
+        return CustomModelProvider(num_classes=5, dataset_name=dataset_name)
     else:
         raise ValueError(f"Unknown dataset for model provision: {dataset_name}")

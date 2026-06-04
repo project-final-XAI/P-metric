@@ -38,7 +38,7 @@ def test_file_manager_paths():
     assert "occluded" in str(occluded_path)
     assert occluded_path.suffix == ".png"
     
-    print("✓ FileManager path methods work correctly")
+    print("FileManager path methods work correctly")
 
 
 if __name__ == "__main__":

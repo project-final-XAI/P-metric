@@ -42,7 +42,16 @@ def _resolve_io_workers(config) -> int:
 # ---------------------------------------------------------------------------
 
 def _load_npy(path: Path) -> np.ndarray:
-    return np.load(path)
+    data = np.load(path, allow_pickle=True)
+    if isinstance(data, np.ndarray):
+        if data.ndim == 0:
+            item = data.item()
+            if isinstance(item, dict) and "sorted_idx" in item:
+                return item["sorted_idx"]
+        return data
+    if hasattr(data, "files") and "sorted_idx" in data.files:
+        return data["sorted_idx"]
+    return data
 
 
 def _save_png(arr: np.ndarray, path: Path) -> None:

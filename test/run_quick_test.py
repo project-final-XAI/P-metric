@@ -44,8 +44,12 @@ logging.basicConfig(
 MAX_IMAGES = 10  # Maximum number of images to process (set to 10 for quick test)
 DATASET_NAME = "imagenet"
 GENERATING_MODELS = ["resnet50"]
-JUDGING_MODELS = ["llama3.2-vision-binary"]
-ATTRIBUTION_METHODS = ["gradcam"] #["inputxgradient", "grad_cam", "random_baseline"]
+JUDGING_MODELS = ["resnet50"]
+ATTRIBUTION_METHODS = [
+    "grad_cam", "guided_gradcam", "expected_gradcam",
+    "dino", "u2net", "u2net+dino",
+    "dino_pca_unet_match", "dinov2_pca_gaussian", "dinov2_pca_attention"
+]
 OCCLUSION_LEVELS = [0, 50] # list(range(10, 100, 10))  # [10, 20, 30, ..., 90]
 FILL_STRATEGIES = ["mean"]
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -100,101 +104,21 @@ def print_config_info(config, max_images):
     print(f"  {'Fill Strategies:':<25} {', '.join(config.FILL_STRATEGIES)}")
 
 
+from core.phase1_runner import Phase1Runner
+
 def run_phase1_limited(config, gpu_manager, file_manager, model_cache, max_images, dataset_handler, model_provider):
     """Run Phase 1 with image limit."""
     print_section_header("PHASE 1: HEATMAP GENERATION")
+    runner = Phase1Runner(config, gpu_manager, file_manager, dataset_handler, model_provider)
     
-    dataset_name = config.DATASET_NAME
-    heatmap_dir = file_manager.get_heatmap_dir(dataset_name)
-    file_manager.ensure_dir_exists(heatmap_dir)
+    # Patch _load_image_label_map to restrict images
+    original_load = runner._load_image_label_map
+    def limited_load():
+        full_map = original_load()
+        return dict(list(full_map.items())[:max_images])
     
-    logging.info("Loading dataset with image limit...")
-    dataloader = dataset_handler.get_dataloader(batch_size=32, shuffle=False)
-    image_label_map = {}
-    global_idx = 0
-    
-    for batch_images, batch_labels in dataloader:
-        if max_images and global_idx >= max_images:
-            break
-        for img, lbl in zip(batch_images, batch_labels):
-            if max_images and global_idx >= max_images:
-                break
-            image_label_map[f"image_{global_idx:05d}"] = (img, lbl.item())
-            global_idx += 1
-    
-    logging.info(f"Processing {len(image_label_map)} images (limited from dataset)")
-    
-    # Process each model-method combination
-    total_combinations = len(config.GENERATING_MODELS) * len(config.ATTRIBUTION_METHODS)
-    with tqdm(total=total_combinations, desc="Phase 1 Progress", 
-              bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]') as pbar:
-        for model_idx, model_name in enumerate(config.GENERATING_MODELS, 1):
-            if model_name not in model_cache:
-                logging.info(f"Loading model: {model_name}")
-                model_cache[model_name] = model_provider.get_model(model_name)
-            model = model_cache[model_name]
-            
-            for method_idx, method_name in enumerate(config.ATTRIBUTION_METHODS, 1):
-                pbar.set_description(
-                    f"[{model_idx}/{len(config.GENERATING_MODELS)}] {model_name[:12]} | "
-                    f"[{method_idx}/{len(config.ATTRIBUTION_METHODS)}] {method_name[:15]}"
-                )
-                try:
-                    method = get_attribution_method(method_name)
-                    batch_size = gpu_manager.get_batch_size(method_name)
-                    
-                    # Collect images to process
-                    images_to_process = []
-                    image_ids = []
-                    labels = []
-                    
-                    for img_id, (img, label) in list(image_label_map.items()):
-                        category_name = dataset_handler.get_category_name(label)
-                        sorted_path = file_manager.get_sorted_heatmap_path(
-                            dataset_name, model_name, method_name, img_id, category_name
-                        )
-                        if not sorted_path.exists():
-                            images_to_process.append(img)
-                            image_ids.append(img_id)
-                            labels.append(label)
-                    
-                    if images_to_process:
-                        logging.debug(f"Processing {len(images_to_process)} images for {model_name}-{method_name}")
-                        # Process in batches
-                        for i in range(0, len(images_to_process), batch_size):
-                            end_idx = min(i + batch_size, len(images_to_process))
-                            batch_images = torch.stack(images_to_process[i:end_idx]).to(config.DEVICE)
-                            batch_labels = torch.tensor(labels[i:end_idx]).to(config.DEVICE)
-                            
-                            # Generate heatmaps
-                            if config.DEVICE == "cuda":
-                                with torch.amp.autocast(config.DEVICE, enabled=False):
-                                    heatmaps = method.compute(model, batch_images, batch_labels)
-                            else:
-                                heatmaps = method.compute(model, batch_images, batch_labels)
-                            
-                            # Save sorted pixel indices
-                            if heatmaps is not None:
-                                for j, heatmap in enumerate(heatmaps):
-                                    img_id = image_ids[i + j]
-                                    lbl = labels[i + j]
-                                    category_name = dataset_handler.get_category_name(lbl)
-                                    heatmap_np = heatmap.cpu().numpy()
-                                    if heatmap_np.ndim == 3:
-                                        heatmap_np = np.mean(heatmap_np, axis=0)
-                                    sorted_indices = sort_pixels(heatmap_np)
-                                    sorted_path = file_manager.get_sorted_heatmap_path(
-                                        dataset_name, model_name, method_name, img_id, category_name
-                                    )
-                                    import numpy as np
-                                    np.save(sorted_path, sorted_indices)
-                
-                except Exception as e:
-                    logging.error(f"Error processing {model_name}-{method_name}: {e}")
-                finally:
-                    pbar.update(1)
-    
-    logging.info(f"Heatmaps saved to: {heatmap_dir}")
+    runner._load_image_label_map = limited_load
+    runner.run()
 
 
 def run_phase2_limited(config, gpu_manager, file_manager, dataset_handler, model_provider):

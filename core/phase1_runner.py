@@ -11,17 +11,14 @@ import logging
 import cv2
 import gc
 from pathlib import Path
-from PIL import Image
 from tqdm import tqdm
 from typing import Dict, Any, Optional, List, Tuple
-
+from matplotlib import pyplot as plt
 from core.gpu_manager import GPUManager
 from core.file_manager import FileManager
 from core.gpu_utils import prepare_batch_tensor, clear_cache_if_needed
 from attribution.registry import get_attribution_method
 from attribution.base import ModelIndependentMethod
-from evaluation.occlusion import sort_pixels
-
 
 _COLORMAP_CV2 = {
     "hot": cv2.COLORMAP_HOT,
@@ -126,16 +123,17 @@ class Phase1Runner:
             logging.error(f"Phase 1 execution failed: {e}")
             raise
 
-    def _load_image_label_map(self) -> Dict[str, Tuple[torch.Tensor, int]]:
-        """Read the dataset once; reuse tensors for every model/method."""
+    def _load_image_label_map(self) -> Dict[str, Tuple[Tuple[torch.Tensor, str], int]]:
+        """Read the dataset once; reuse tensors/paths for every model/method."""
         loader_batch = getattr(self.config, "HEATMAP_BATCH_SIZE", 12)
-        dataloader = self.dataset_handler.get_dataloader(batch_size=loader_batch, shuffle=False)
+        dataloader = self.dataset_handler.get_dual_dataloader(batch_size=loader_batch, shuffle=False)
 
-        image_label_map: Dict[str, Tuple[torch.Tensor, int]] = {}
+        image_label_map = {}
         global_idx = 0
         for batch_images, batch_labels in dataloader:
-            for img, lbl in zip(batch_images, batch_labels):
-                image_label_map[f"image_{global_idx:05d}"] = (img, lbl.item())
+            _, attr_batch, path_batch = batch_images
+            for attr, path, lbl in zip(attr_batch, path_batch, batch_labels):
+                image_label_map[f"image_{global_idx:05d}"] = ((attr, path), lbl.item())
                 global_idx += 1
         return image_label_map
 
@@ -144,19 +142,20 @@ class Phase1Runner:
         model: Optional[Any],
         model_name: Optional[str],
         method_name: str,
-        image_label_map: Dict[str, Tuple[torch.Tensor, int]],
+        image_label_map: Dict[str, Tuple[Tuple[torch.Tensor, str], int]],
         dataset_name: str,
     ):
         """Process images for one model-method pair, batching from the in-memory cache."""
         method = get_attribution_method(method_name)
         batch_size = self.gpu_manager.get_batch_size(method_name)
 
-        images_to_process: List[torch.Tensor] = []
+        images_to_process: List[Tuple[torch.Tensor, str]] = []
         labels: List[int] = []
         sorted_paths: List[Path] = []
         regular_paths: List[Path] = []
 
-        for img_id, (img, label) in image_label_map.items():
+        for img_id, (data_tuple, label) in image_label_map.items():
+            attr, path = data_tuple
             category_name = self.dataset_handler.get_category_name(label)
             s_path = self.file_manager.get_sorted_heatmap_path(
                 dataset_name, model_name, method_name, img_id, category_name
@@ -166,7 +165,7 @@ class Phase1Runner:
             )
 
             if not s_path.exists() or not r_path.exists():
-                images_to_process.append(img)
+                images_to_process.append(data_tuple)
                 labels.append(label)
                 sorted_paths.append(s_path)
                 regular_paths.append(r_path)
@@ -189,9 +188,13 @@ class Phase1Runner:
                 self.gpu_manager.check_and_throttle()
 
             end_idx = min(i + batch_size, len(images_to_process))
+            batch_data = images_to_process[i:end_idx]
 
-            batch_images = prepare_batch_tensor(
-                images_to_process[i:end_idx],
+            attr_list = [t[0] for t in batch_data]
+            paths = [t[1] for t in batch_data]
+
+            batch_attr = prepare_batch_tensor(
+                attr_list,
                 device=self.config.DEVICE,
                 memory_format=torch.channels_last,
             )
@@ -199,11 +202,41 @@ class Phase1Runner:
                 self.config.DEVICE, non_blocking=True
             )
 
+            # Predict target classes using classification cropped images
+            if model is not None:
+                # Retrieve dynamic transforms assigned to the model
+                transform = getattr(model, "transforms", None)
+                if transform is None:
+                    from data.loader import get_clf_transform
+                    transform = get_clf_transform(self.config.DATASET_NAME)
+
+                from PIL import Image
+                clf_list = []
+                for p in paths:
+                    img_pil = Image.open(p).convert("RGB")
+                    clf_list.append(transform(img_pil))
+
+                batch_clf = prepare_batch_tensor(
+                    clf_list,
+                    device=self.config.DEVICE,
+                    memory_format=torch.channels_last,
+                )
+
+                model.eval()
+                with torch.no_grad():
+                    logits = model(batch_clf)
+                    batch_targets = torch.argmax(logits, dim=1)
+            else:
+                batch_targets = batch_labels
+
+            # Pass paths to attribution method
+            method.current_paths = paths
+
             if self.config.DEVICE == "cuda":
                 with torch.amp.autocast(self.config.DEVICE, enabled=False):
-                    heatmaps = method.compute(model, batch_images, batch_labels)
+                    heatmaps = method.compute(model, batch_attr, batch_targets)
             else:
-                heatmaps = method.compute(model, batch_images, batch_labels)
+                heatmaps = method.compute(model, batch_attr, batch_targets)
 
             if heatmaps is not None:
                 for j, heatmap in enumerate(heatmaps):
@@ -211,26 +244,35 @@ class Phase1Runner:
                     if heatmap_np.ndim == 3:
                         heatmap_np = np.mean(heatmap_np, axis=0)
 
-                    sorted_indices = sort_pixels(heatmap_np)
-                    np.save(sorted_paths[i + j], sorted_indices)
+                    ranking = heatmap_np.flatten() + np.random.uniform(0, 1e-9, size=heatmap_np.size)
+                    sorted_indices = np.argsort(ranking)[::-1].astype(np.uint32)
+                    
+                    pred_class_id = int(batch_targets[j].item())
+                    pred_class_name = self.dataset_handler.get_category_name(pred_class_id)
+                    gt_class_id = int(batch_labels[j].item())
+                    gt_class_name = self.dataset_handler.get_category_name(gt_class_id)
+                    
+                    np.save(
+                        sorted_paths[i + j],
+                        {
+                            "sorted_idx": sorted_indices,
+                            "shape": heatmap_np.shape,
+                            "predicted_class": pred_class_id,
+                            "predicted_class_name": pred_class_name,
+                            "ground_truth_class": gt_class_id,
+                            "ground_truth_class_name": gt_class_name
+                        }
+                    )
                     self._save_heatmap_png(heatmap_np, regular_paths[i + j])
 
         self.gpu_manager.check_and_throttle()
         clear_cache_if_needed()
 
     def _save_heatmap_png(self, heatmap: np.ndarray, path: Path):
-        """Save heatmap as PNG image with colormap."""
+        """Save heatmap as PNG image with colormap matching the stage1 reference code."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        hmap = heatmap.copy()
-        hmap = (hmap - hmap.min()) / (hmap.max() - hmap.min() + 1e-8)
-        hmap_uint8 = (hmap * 255).astype(np.uint8)
-
-        colormap = getattr(self.config, "HEATMAP_COLORMAP", "hot")
-        cv_colormap = _COLORMAP_CV2.get(colormap.lower(), cv2.COLORMAP_HOT)
-
-        heatmap_colored = cv2.applyColorMap(hmap_uint8, cv_colormap)
-        heatmap_rgb = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
-        Image.fromarray(heatmap_rgb).save(path, "PNG")
+        colormap = getattr(self.config, "HEATMAP_COLORMAP", "jet")
+        plt.imsave(str(path), heatmap, cmap=colormap.lower(), vmin=0.0, vmax=1.0)
 
 
 if __name__ == "__main__":

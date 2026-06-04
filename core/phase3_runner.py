@@ -357,6 +357,12 @@ class Phase3Runner:
             judge_model: Any,
             image_label_map: Dict[str, int]
     ):
+        # Update self.transform dynamically for model-specific evaluation
+        if hasattr(judge_model, "transforms"):
+            self.transform = judge_model.transforms
+        else:
+            self.transform = get_base_transforms()
+
         # Gracefully handle naming configurations when model is independent
         output_gen_name = gen_model if gen_model is not None else "independent"
         result_file = self.file_manager.get_result_file_path(
