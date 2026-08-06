@@ -245,7 +245,7 @@ class Phase1Runner:
                         heatmap_np = np.mean(heatmap_np, axis=0)
 
                     ranking = heatmap_np.flatten() + np.random.uniform(0, 1e-9, size=heatmap_np.size)
-                    sorted_indices = np.argsort(ranking)[::-1].astype(np.uint32)
+                    sorted_indices = np.argsort(ranking).astype(np.uint32)
                     
                     pred_class_id = int(batch_targets[j].item())
                     pred_class_name = self.dataset_handler.get_category_name(pred_class_id)

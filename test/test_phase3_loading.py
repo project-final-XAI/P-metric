@@ -22,13 +22,13 @@ def test_image_loading_paths():
     assert "occluded" in str(occluded_dir)
     
     # Test checking if image exists (will be False if not generated yet)
-    exists = file_manager.check_occluded_image_exists(
+    img_path = file_manager.get_occluded_image_path(
         "imagenet", "resnet50", "mean", "grad_cam", 50, "image_00000"
     )
-    # This is fine - just checking the method works
+    exists = img_path.exists()
     assert isinstance(exists, bool)
     
-    print("✓ Image loading methods work correctly")
+    print("[OK] Image loading methods work correctly")
 
 
 if __name__ == "__main__":

@@ -38,9 +38,14 @@ class ContinuousWrapper(AttributionMethod):
         if self.sigma <= 0:
             return heatmaps
 
+        # Get the device of the input tensor (CPU or CUDA)
+        device = heatmaps.device
+
         half = math.ceil(3.0 * self.sigma)
         ksize = 2 * half + 1
-        coords = torch.arange(ksize, dtype=torch.float32) - half
+
+        # Move coords and subsequent calculations to the correct device
+        coords = torch.arange(ksize, dtype=torch.float32, device=device) - half
         g = torch.exp(-(coords ** 2) / (2.0 * self.sigma ** 2))
         g = g / g.sum()
         kernel = torch.outer(g, g)

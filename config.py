@@ -116,22 +116,22 @@ GENERATING_MODELS = [
     # "vit_b_16",
     # "swin_t",
 
-    # "sipakmed_efficientnetB0.pth",
+    "sipakmed_efficientnetB0.pth",
     "sipakmed_ResNet50.pth",
 ]
 
 # Models used for evaluating occluded images (Phase 2)
 JUDGING_MODELS = [
-    "resnet50",
-    "efficientnet_b0",
-    "vgg16",
-    "mobilenet_v2",
+    # "resnet50",
+    # "efficientnet_b0",
+    # "vgg16",
+    # "mobilenet_v2",
 
     # "vit_b_16",
     # "swin_t",
 
-    # "sipakmed_cropped_efficientnet.pth",
-    # "sipakmed_cropped_ResNet50.pth",
+    "sipakmed_efficientnetB0.pth",
+    "sipakmed_ResNet50.pth",
 
     # "llama3.2-vision-binary",
     # "llama3.2-vision-cosine",
@@ -144,39 +144,42 @@ JUDGING_MODELS = [
 ATTRIBUTION_METHODS = [
     # --- Model-dependent (need the classifier) ---
     "grad_cam",
-    # "saliency",
-    # "inputxgradient",
-    # "smoothgrad",
-    # "guided_backprop",
-    # "integrated_gradients",
-    # "occlusion",
-    # "gradientshap",
-    #
-    # endent (DINO / U2Net) ---
+    "saliency",
+    "inputxgradient",
+    "smoothgrad",
+    "guided_backprop",
+    "integrated_gradients",
+    "occlusion",
+    "gradientshap",
+    "xrai",
+    "guided_gradcam",
+    "random_baseline",
+
+    # --- Model-independent (DINO / U2Net) ---
     # "dinov2_attention",
     # "dinov2_PC1",
     # "dinov2_PC_EV",
     # "dinov2_PC_L2",
     # "dinov2_COMBO_FIXED",
     # "dinov2_ENT",
-    # "dinov2_COMBO_ENT_SMOOTH",
-    #
-    # "dino",
-    # "dino448",
-    # "u2net",
-    # "u2net+dino",
-    # "dino+u2net_sum",
-    # "u2net+dino_320",
-    # "dino448+u2net",
+    "dinov2_COMBO_ENT_SMOOTH",
+
+    "dino",
+    "dino448",
+    "u2net",
+    "u2net+dino",
+    "dino+u2net_sum",
+    "u2net+dino_320",
+    "dino448+u2net",
 
     # --- Continuous wrappers ---
     # "saliency_continuous",
     # "inputxgradient_continuous",
     # "guided_backprop_continuous",
-    # "integrated_gradients_continuous",
+    "integrated_gradients_continuous",
     # "gradientshap_continuous",
     # "occlusion_continuous",
-    # "xrai_continuous",
+    "xrai_continuous",
     # "grad_cam_continuous",
     # "guided_gradcam_continuous",
     # "random_baseline_continuous",
@@ -195,6 +198,7 @@ ATTRIBUTION_METHODS = [
     # "guided_gradcam_u2net_fill",
     # "random_baseline_u2net_fill",
 ]
+
 
 # -----------------
 # DINOv2 Configuration
