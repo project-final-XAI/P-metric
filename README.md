@@ -1,4 +1,4 @@
-# CROSS-XAI: Cross-Model Explainable AI Evaluation Framework
+ּּ# CROSS-XAI: Cross-Model Explainable AI Evaluation Framework
 
 A framework for evaluating attribution methods using cross-model, occlusion-based faithfulness testing.
 
@@ -12,7 +12,7 @@ XAI methods produce heatmaps that claim to show which pixels mattered for a mode
 The hard part is not generating heatmaps, it is **validating** them.
 
 Human inspection is useful but subjective. CROSS-XAI turns this into a measurable process:
-
+ּ
 1. Rank pixels by method importance.
 2. Progressively remove top-ranked pixels.
 3. Ask independent judging models how performance degrades.

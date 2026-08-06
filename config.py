@@ -100,24 +100,24 @@ DATASET_CONFIG = {
 }
 
 # Current dataset to use
-DATASET_NAME = "imagenet"
-# DATASET_NAME = "SIPaKMeD_cropped"
+# DATASET_NAME = "imagenet"
+DATASET_NAME = "SIPaKMeD_cropped"
 
 # -----------------
 # Model Configuration
 # -----------------
 # Models used for generating attribution heatmaps (Phase 1)
 GENERATING_MODELS = [
-    "resnet50",
-    "efficientnet_b0",
-    "vgg16",
-    "mobilenet_v2",
+    # "resnet50",
+    # "efficientnet_b0",
+    # "vgg16",
+    # "mobilenet_v2",
     #
     # "vit_b_16",
     # "swin_t",
 
     # "sipakmed_efficientnetB0.pth",
-    # "sipakmed_ResNet50.pth",
+    "sipakmed_ResNet50.pth",
 ]
 
 # Models used for evaluating occluded images (Phase 2)
@@ -144,13 +144,13 @@ JUDGING_MODELS = [
 ATTRIBUTION_METHODS = [
     # --- Model-dependent (need the classifier) ---
     "grad_cam",
-    "saliency",
-    "inputxgradient",
-    "smoothgrad",
-    "guided_backprop",
-    "integrated_gradients",
-    "occlusion",
-    "gradientshap",
+    # "saliency",
+    # "inputxgradient",
+    # "smoothgrad",
+    # "guided_backprop",
+    # "integrated_gradients",
+    # "occlusion",
+    # "gradientshap",
     #
     # endent (DINO / U2Net) ---
     # "dinov2_attention",
@@ -159,15 +159,15 @@ ATTRIBUTION_METHODS = [
     # "dinov2_PC_L2",
     # "dinov2_COMBO_FIXED",
     # "dinov2_ENT",
-    "dinov2_COMBO_ENT_SMOOTH",
+    # "dinov2_COMBO_ENT_SMOOTH",
     #
-    "dino",
-    "dino448",
-    "u2net",
-    "u2net+dino",
-    "dino+u2net_sum",
-    "u2net+dino_320",
-    "dino448+u2net",
+    # "dino",
+    # "dino448",
+    # "u2net",
+    # "u2net+dino",
+    # "dino+u2net_sum",
+    # "u2net+dino_320",
+    # "dino448+u2net",
 
     # --- Continuous wrappers ---
     # "saliency_continuous",
